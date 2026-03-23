@@ -1,0 +1,163 @@
+import { JSONCodec } from 'nats.ws';
+import { decode as msgpackDecode } from '@msgpack/msgpack';
+import { validateHierarchyName, validateHierarchyWildcard, validateArray, validateFunction, validateConnected } from './validation.js';
+import { topicPatternMatcher } from './utils.js';
+
+export class HeirarchyGroupManager {
+    #ctx;
+    #codec = JSONCodec();
+    #streamConsumers = new Map();
+
+    constructor(ctx) {
+        this.#ctx = ctx;
+    }
+
+    #subject(op) {
+        return `api.iot.cohort.${this.#ctx.orgID}.heirarchy.${op}`;
+    }
+
+    async #request(op, payload) {
+        const res = await this.#ctx.natsClient.request(
+            this.#subject(op),
+            this.#codec.encode(payload),
+            { timeout: 5000 }
+        );
+        return res.json();
+    }
+
+    #wrapGroup(data) {
+        if (!data) return data;
+        const group = { ...data };
+        group.stream = (params) => this.#streamGroup(data.id, params);
+        return group;
+    }
+
+    async create(params) {
+        validateConnected(this.#ctx.connected);
+        validateHierarchyName(params.name, 'name');
+        validateHierarchyName(params.heirarchy, 'heirarchy');
+        validateArray(params.device_idents, 'device_idents');
+
+        const deviceIds = await this.#ctx.device.resolveDeviceIds(params.device_idents);
+
+        return this.#request('create', {
+            device_ids: deviceIds,
+            name: params.name,
+            heirarchy: params.heirarchy,
+        });
+    }
+
+    async update(params) {
+        validateConnected(this.#ctx.connected);
+        if (!params.id) throw new Error('id is required');
+
+        const payload = { id: params.id };
+
+        if (params.devices) {
+            payload.devices = {
+                add: params.devices.add ? await this.#ctx.device.resolveDeviceIds(params.devices.add) : [],
+                remove: params.devices.remove ? await this.#ctx.device.resolveDeviceIds(params.devices.remove) : [],
+            };
+        }
+
+        if (params.heirarchy) {
+            validateHierarchyName(params.heirarchy, 'heirarchy');
+            payload.heirarchy = params.heirarchy;
+        }
+
+        return this.#request('update', payload);
+    }
+
+    async delete(groupId) {
+        validateConnected(this.#ctx.connected);
+        if (!groupId) throw new Error('group_id is required');
+
+        const res = await this.#request('delete', { id: groupId });
+        return res.status === 'HEIRARCHY_GROUP_DELETE_SUCCESS';
+    }
+
+    async list() {
+        validateConnected(this.#ctx.connected);
+        const res = await this.#request('list', {});
+        return res.data || [];
+    }
+
+    async get(groupId) {
+        validateConnected(this.#ctx.connected);
+        if (!groupId) throw new Error('group_id is required');
+
+        const res = await this.#request('get', { id: groupId });
+        if (res.status === 'HEIRARCHY_GROUP_GET_SUCCESS') {
+            return this.#wrapGroup(res.data);
+        }
+        return res;
+    }
+
+    async listDevices(groupId) {
+        validateConnected(this.#ctx.connected);
+        if (!groupId) throw new Error('group_id is required');
+
+        const res = await this.#ctx.natsClient.request(
+            `api.iot.cohort.${this.#ctx.orgID}.heirarchy.device.list`,
+            this.#codec.encode({ id: groupId }),
+            { timeout: 5000 }
+        );
+        const data = res.json();
+        return data.data || [];
+    }
+
+    async #streamGroup(groupId, params) {
+        validateConnected(this.#ctx.connected);
+        validateFunction(params.callback, 'callback');
+
+        if (params.heirarchy) {
+            validateHierarchyWildcard(params.heirarchy, 'heirarchy');
+        }
+
+        const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.heirarchy.listen.${groupId}`;
+
+        const consumer = await this.#ctx.jetstream.consumers.get(
+            `${this.#ctx.orgID}_stream`,
+            {
+                name: `appjs_heirarchy_group_${groupId}_${crypto.randomUUID()}`,
+                filter_subjects: subject,
+                replay_policy: 'instant',
+                opt_start_time: new Date(),
+                ack_policy: 'explicit',
+                delivery_policy: 'new',
+            }
+        );
+
+        this.#streamConsumers.set(groupId, consumer);
+
+        const filterIdents = params.device_idents || null;
+        const filterHierarchy = params.heirarchy || null;
+
+        await consumer.consume({
+            callback: async (msg) => {
+                msg.working();
+                const data = msgpackDecode(msg.data);
+                msg.ack();
+
+                if (filterIdents && !filterIdents.includes(data.ident)) {
+                    return;
+                }
+
+                if (filterHierarchy && data.heirarchy) {
+                    if (!topicPatternMatcher(filterHierarchy, data.heirarchy)) {
+                        return;
+                    }
+                }
+
+                params.callback(data);
+            },
+        });
+    }
+
+    async deleteAllConsumers() {
+        for (const [, consumer] of this.#streamConsumers) {
+            await consumer.delete();
+        }
+        this.#streamConsumers.clear();
+    }
+}
