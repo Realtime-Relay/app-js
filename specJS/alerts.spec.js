@@ -894,6 +894,8 @@
  * 3. RUN EVALUATOR: evaluator(rollingState) → boolean
  *    - true = breach
  *    - false = clear
+ *    - If evaluator throws: call onError(err), skip evaluation cycle, state unchanged
+ *    - If evaluator returns non-boolean: call onError(new Error("Evaluator must return a boolean, got <type>")), skip cycle
  *
  * 4. CHECK STALENESS: If gap > duration*1000ms → reset breached_since, clear_since
  *
