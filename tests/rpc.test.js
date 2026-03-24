@@ -55,10 +55,24 @@ describe('RPCManager', () => {
             await expect(rpc.call({ device_ident: 'gateway_01', name: 'x', timeout: -1, data: {} })).rejects.toThrow('positive number');
         });
 
+        it('uses default 10s timeout when not provided', async () => {
+            const ctx = makeCtx();
+            const rpc = new RPCManager(ctx);
+
+            await rpc.call({
+                device_ident: 'gateway_01',
+                name: 'get_diagnostics',
+                data: { include_logs: true },
+            });
+
+            const [, , opts] = ctx.natsClient.request.mock.calls[0];
+            expect(opts.timeout).toBe(10000);
+        });
+
         it('throws on missing data', async () => {
             const ctx = makeCtx();
             const rpc = new RPCManager(ctx);
-            await expect(rpc.call({ device_ident: 'gateway_01', name: 'x', timeout: 5 })).rejects.toThrow('data is required');
+            await expect(rpc.call({ device_ident: 'gateway_01', name: 'x' })).rejects.toThrow('data is required');
         });
 
         it('throws when not connected', async () => {

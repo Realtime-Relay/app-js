@@ -72,19 +72,7 @@ export class EphemeralEngine {
 
     async #subscribeTelemetry() {
         const deviceId = this.#rule.config.scope.value;
-        // Resolve device_id to ident for telemetry subject
-        let deviceIdent = null;
-        for (const [ident, device] of this.#ctx.device.cache) {
-            if (device.id === deviceId) {
-                deviceIdent = ident;
-                break;
-            }
-        }
-        if (!deviceIdent) {
-            throw new Error(`Cannot resolve device_id ${deviceId} to ident for telemetry subscription`);
-        }
-
-        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceIdent}.${this.#rule.metric}`;
+        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceId}.${this.#rule.metric}`;
 
         this.#telemetryConsumer = await this.#ctx.jetstream.consumers.get(
             `${this.#ctx.orgID}_stream`,
@@ -278,13 +266,13 @@ export class EphemeralEngine {
     async #publishFire(telemetryData, timestamp) {
         const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${this.#rule.id}.fire`;
         const payload = this.#buildAlertPayload(telemetryData, timestamp);
-        await this.#ctx.jetstream.publish(subject, msgpackEncode(payload));
+        await this.#ctx.publishOrBuffer(subject, msgpackEncode(payload));
     }
 
     async #publishResolved(telemetryData, timestamp) {
         const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${this.#rule.id}.resolved`;
         const payload = this.#buildAlertPayload(telemetryData, timestamp);
-        await this.#ctx.jetstream.publish(subject, msgpackEncode(payload));
+        await this.#ctx.publishOrBuffer(subject, msgpackEncode(payload));
     }
 
     async #dispatchNotifications(telemetryData, timestamp) {
@@ -326,7 +314,7 @@ export class EphemeralEngine {
         }
 
         const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${this.#rule.id}.ack`;
-        await this.#ctx.jetstream.publish(subject, msgpackEncode({
+        await this.#ctx.publishOrBuffer(subject, msgpackEncode({
             status: 'acknowledged',
             device_ident: deviceIdent,
             ack: {
@@ -360,7 +348,7 @@ export class EphemeralEngine {
         this.#state.ack_notes = ackNotes;
 
         const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${this.#rule.id}.ack_all`;
-        await this.#ctx.jetstream.publish(subject, msgpackEncode({
+        await this.#ctx.publishOrBuffer(subject, msgpackEncode({
             status: 'acknowledged',
             ack: {
                 acked_by: ackedBy,

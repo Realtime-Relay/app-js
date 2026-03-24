@@ -44,10 +44,11 @@
  * { status: "LOGICAL_GROUP_CREATE_SUCCESS" }
  *
  * @behavior
- * - Resolves device_idents to device_ids via device cache
- * - Returns group object with .stream() method on success
+ * - Resolves device_idents to device_ids via device cache (skips unfound)
+ * - If res.data exists, wraps with .stream() and returns
+ * - If res.data is absent, returns undefined
  *
- * @returns {Promise<LogicalGroupObject>} Group object with .stream()
+ * @returns {Promise<LogicalGroupObject|undefined>} Group object with .stream() if data returned, else undefined
  *
  * @example
  * var group = await app.logicalGroup.create({
@@ -55,6 +56,7 @@
  *     tags: ["floor_1", "temperature"],
  *     device_idents: ["sensor_01", "sensor_02", "sensor_03"]
  * })
+ * // group.stream({ callback: (data) => ... })
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -104,9 +106,11 @@
  * { status: "LOGICAL_GROUP_UPDATE_FAILURE", data: { msg: string[] } }
  *
  * @behavior
- * - Resolves device idents in add/remove arrays to device_ids via cache
+ * - Resolves device idents in add/remove arrays to device_ids via cache (skips unfound)
+ * - If res.data exists, wraps with .stream() and returns
+ * - If res.data is absent, returns undefined
  *
- * @returns {Promise<LogicalGroupObject>} Updated group object with .stream()
+ * @returns {Promise<LogicalGroupObject|undefined>} Updated group object with .stream() if data returned, else undefined
  *
  * @example
  * var group = await app.logicalGroup.update({
@@ -208,7 +212,11 @@
  * // Failure:
  * { status: "LOGICAL_GROUP_GET_FAILURE", data: null }
  *
- * @returns {Promise<LogicalGroupObject>} Group object with .stream()
+ * @behavior
+ * - On LOGICAL_GROUP_GET_SUCCESS, injects `id = groupId` into res.data, wraps with .stream()
+ * - On failure, returns raw response object
+ *
+ * @returns {Promise<LogicalGroupObject|object>} Wrapped group on success, raw response on failure
  *
  * @example
  * var group = await app.logicalGroup.get("<group_id>")

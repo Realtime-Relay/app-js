@@ -195,16 +195,16 @@
  */
 
 // ─────────────────────────────────────────────────────────────
-// app.alert.delete(alertName)
+// app.alert.delete(alertId)
 // ─────────────────────────────────────────────────────────────
 
 /**
  * @method alert.delete
  * @description Deletes an alert rule by ID.
  *
- * @param {string} alertName - Required. Alert name or ID.
+ * @param {string} alertId - Required. Alert rule ID.
  *
- * @throws {Error} If alertName is null/undefined/empty
+ * @throws {Error} If id is null/undefined/empty
  * @throws {Error} If not connected
  * @throws {Error} On transport/timeout failure
  *
@@ -224,7 +224,7 @@
  * @returns {Promise<boolean>} true on successful deletion
  *
  * @example
- * var deleted = await app.alert.delete("high_temp")
+ * var deleted = await app.alert.delete("67e1a2b3c4d5e6f7a8b9c0d1")
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -284,14 +284,16 @@
  * // Failure:
  * { status: "ALERT_GET_FAILURE", data: { msg: string[] } }
  *
- * @returns {Promise<AlertObject>} Alert object with .listen() and .setEvaluator()
+ * @returns {Promise<AlertObject|null>} Alert object with .listen() and .setEvaluator(),
+ *          or null if not found
  *
  * @example
  * var alert = await app.alert.get("high_temp")
+ * if (!alert) console.log("Alert not found")
  */
 
 // ─────────────────────────────────────────────────────────────
-// app.alert.ack({ alert, acked_by })
+// app.alert.ack({ device_id, alert_id, acked_by, ack_notes? })
 // ─────────────────────────────────────────────────────────────
 
 /**
@@ -299,10 +301,13 @@
  * @description Acknowledges an alert for a specific device.
  *
  * @param {Object} params
- * @param {Object} params.alert     - Required. Alert object (from get/create/update).
- * @param {string} params.acked_by  - Required. Identifier of who is acknowledging.
+ * @param {string} params.device_id  - Required. Device ID to ack alert for.
+ * @param {string} params.alert_id   - Required. Alert rule ID.
+ * @param {string} params.acked_by   - Required. Identifier of who is acknowledging.
+ * @param {string} [params.ack_notes] - Optional. Notes for the acknowledgment.
  *
- * @throws {Error} If alert is null/undefined
+ * @throws {Error} If device_id is null/undefined/empty
+ * @throws {Error} If alert_id is null/undefined/empty
  * @throws {Error} If acked_by is null/undefined/empty
  * @throws {Error} If not connected
  * @throws {Error} On transport/timeout failure
@@ -313,7 +318,7 @@
  *
  * @request_payload
  * {
- *     device_id: string,     // From alert context
+ *     device_id: string,     // Device ID
  *     rule_id: string,       // Alert rule ID
  *     acked_by: string,      // Who is acking
  *     env: string,           // From app mode
@@ -341,13 +346,15 @@
  *
  * @example
  * var ack = await app.alert.ack({
- *     alert: alertObj,
- *     acked_by: "operator_jane"
+ *     device_id: "69bffcb28cc30a4f716936bc",
+ *     alert_id: "rule_1",
+ *     acked_by: "operator_jane",
+ *     ack_notes: "Investigating cooling system"
  * })
  */
 
 // ─────────────────────────────────────────────────────────────
-// app.alert.ackAll({ alert, acked_by })
+// app.alert.ackAll({ alert_id, acked_by, ack_notes? })
 // ─────────────────────────────────────────────────────────────
 
 /**
@@ -355,10 +362,11 @@
  * @description Acknowledges an alert across all devices for a rule.
  *
  * @param {Object} params
- * @param {Object} params.alert     - Required. Alert object.
+ * @param {string} params.alert_id  - Required. Alert rule ID.
  * @param {string} params.acked_by  - Required. Identifier of who is acknowledging.
+ * @param {string} [params.ack_notes] - Optional. Notes for the acknowledgment.
  *
- * @throws {Error} If alert is null/undefined
+ * @throws {Error} If alert_id is null/undefined/empty
  * @throws {Error} If acked_by is null/undefined/empty
  * @throws {Error} If not connected
  * @throws {Error} On transport/timeout failure
@@ -396,8 +404,9 @@
  *
  * @example
  * var ackAll = await app.alert.ackAll({
- *     alert: alertObj,
- *     acked_by: "operator_jane"
+ *     alert_id: "rule_1",
+ *     acked_by: "operator_jane",
+ *     ack_notes: "Bulk ack for maintenance window"
  * })
  */
 
@@ -509,28 +518,33 @@
  * @throws {Error} If alert object is invalid
  * @throws {Error} If not connected
  *
- * @nats_subjects (JetStream consumers — ALL alert types subscribe to these):
- * - import.{orgID}.{env}.alerts.listen.<rule_id>.fire       → onFire
- * - import.{orgID}.{env}.alerts.listen.<rule_id>.resolved   → onResolved
- * - import.{orgID}.{env}.alerts.listen.<rule_id>.ack        → onAck
- * - import.{orgID}.{env}.alerts.listen.<rule_id>.ack_all    → onAckAll
+ * @nats_subject import.{orgID}.{env}.alerts.listen.<rule_id>.*
+ * @nats_type jetstream_consumer (single wildcard consumer)
+ *
+ * The last token of the subject determines the event type:
+ * - fire       → onFire
+ * - resolved   → onResolved
+ * - ack        → onAck
+ * - ack_all    → onAckAll
+ * Messages with unrecognised last tokens are silently ignored.
  * @encoding msgpack (decode on receive)
  *
  * @callback_payloads
  *
- * onFire / onResolved:
+ * onFire / onResolved (after SDK transformation):
  * {
- *     rule: {
+ *     alert: {
+ *         id: string,            // Rule ID
  *         name: string,          // Rule name
  *         type: string,          // Scope type (DEVICE, LOGICAL_GROUP, HEIRARCHY)
  *         type_value: string     // Scope value
  *     },
- *     device_id: string,
+ *     device_id: string,         // Device ID
  *     last_value: {
  *         value: any,            // Current metric value
  *         field_name: string     // Metric name
  *     },
- *     timestamp: number          // Unix ms timestamp
+ *     timestamp: string          // ISO8601 datetime string (converted from unix ms)
  * }
  *
  * onAck:
@@ -556,10 +570,13 @@
  * // NOTE: No device_ident in onAckAll
  *
  * @behavior_non_ephemeral (THRESHOLD, RATE_CHANGE)
- * - Creates 4 JetStream consumers (one per event type)
+ * - Creates 1 JetStream consumer with wildcard subject (rule_id.*)
+ * - Extracts last token from msg.subject to determine event type
  * - Decodes msgpack for each message
- * - Invokes the appropriate callback with decoded data
- * - Pure passthrough — no local processing
+ * - Transforms payload before invoking callback:
+ *   - Converts timestamp (unix ms) → ISO8601 string
+ * - Invokes the matching callback (onFire/onResolved/onAck/onAckAll) with transformed data
+ * - Ignores messages whose last token is not fire/resolved/ack/ack_all
  *
  * @behavior_ephemeral (see EPHEMERAL ALERT ENGINE section below)
  * - Subscribes to JetStream alert topics (same 4 consumers) for remote events
@@ -628,6 +645,12 @@
  *
  * The engine is activated when .listen() is called on an EPHEMERAL alert
  * that has an evaluator set (via create config or .setEvaluator()).
+ *
+ * ─── OFFLINE BUFFER ───
+ *
+ * All JetStream publishes (fire, resolved, ack, ack_all) go through
+ * ctx.publishOrBuffer(). If the client is disconnected, messages are
+ * queued in ctx.offlineBuffer[] and flushed automatically on reconnect.
  *
  * ─── TELEMETRY SUBSCRIPTION ───
  *

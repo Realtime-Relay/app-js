@@ -47,10 +47,11 @@
  * { status: "HEIRARCHY_GROUP_CREATE_SUCCESS" }
  *
  * @behavior
- * - Resolves device_idents to device_ids via device cache
- * - Returns group object with .stream() method on success
+ * - Resolves device_idents to device_ids via device cache (skips unfound)
+ * - If res.data exists, wraps with .stream() and returns
+ * - If res.data is absent, returns undefined
  *
- * @returns {Promise<HeirarchyGroupObject>} Group object with .stream()
+ * @returns {Promise<HeirarchyGroupObject|undefined>} Group object with .stream() if data returned, else undefined
  *
  * @example
  * var group = await app.heirarchyGroup.create({
@@ -58,6 +59,7 @@
  *     heirarchy: "building_a.floor_1",
  *     device_idents: ["sensor_01", "sensor_02"]
  * })
+ * // group.stream({ callback: (data) => ... })
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -103,9 +105,11 @@
  * { status: "HIERARCHY_GROUP_UPDATE_FAILURE", data: { msg: string[] } }
  *
  * @behavior
- * - Resolves device idents in add/remove arrays to device_ids via cache
+ * - Resolves device idents in add/remove arrays to device_ids via cache (skips unfound)
+ * - If res.data exists, wraps with .stream() and returns
+ * - If res.data is absent, returns undefined
  *
- * @returns {Promise<HeirarchyGroupObject>} Updated group object with .stream()
+ * @returns {Promise<HeirarchyGroupObject|undefined>} Updated group object with .stream() if data returned, else undefined
  *
  * @example
  * var group = await app.heirarchyGroup.update({
@@ -200,7 +204,11 @@
  * // Failure:
  * { status: "HEIRARCHY_GROUP_GET_FAILURE", data: null }
  *
- * @returns {Promise<HeirarchyGroupObject>} Group object with .stream()
+ * @behavior
+ * - On HEIRARCHY_GROUP_GET_SUCCESS, injects `id = groupId` into res.data, wraps with .stream()
+ * - On failure, returns raw response object
+ *
+ * @returns {Promise<HeirarchyGroupObject|object>} Wrapped group on success, raw response on failure
  *
  * @example
  * var group = await app.heirarchyGroup.get("<group_id>")
@@ -237,52 +245,70 @@
  */
 
 // ─────────────────────────────────────────────────────────────
-// heirarchyGroup.stream({ device_idents?, heirarchy?, callback })
+// heirarchyGroup.stream({ device_idents?, heirarchy?, metric?, metrics?, callback })
 // ─────────────────────────────────────────────────────────────
 
 /**
  * @method heirarchyGroup.stream
  * @description Subscribes to the hierarchy group's real-time data stream.
- *              Optionally filters by device identifiers and/or hierarchy
- *              wildcard pattern (both client-side).
+ *              Metric and hierarchy are part of the NATS subject (server-side).
+ *              Device idents and multi-metric arrays are filtered client-side.
  *
  * @param {Object} params
  * @param {string[]} [params.device_idents]  - Optional. Array of device identifiers
- *                                              to filter on. Only data from matching
- *                                              devices is passed to callback.
- * @param {string}   [params.heirarchy]      - Optional. Hierarchy wildcard pattern for
- *                                              client-side filtering.
+ *                                              to filter on (client-side).
+ * @param {string}   [params.heirarchy]      - Optional. Hierarchy wildcard override
+ *                                              for the NATS subject. If omitted, uses
+ *                                              the group's stored hierarchy path.
  *                                              Validated: [a-zA-Z0-9_.*>-]+
- *                                              Supports NATS-style wildcards:
- *                                              "*" matches single token,
- *                                              ">" matches one or more tokens (must be last).
- *                                              Example: "building_a.*" or "building_a.>"
+ *                                              ">" must be the last token.
+ * @param {string}   [params.metric]         - Optional. Must be "*" (all metrics).
+ *                                              Mutually exclusive with `metrics`.
+ * @param {string[]} [params.metrics]        - Optional. Array of specific metric names.
+ *                                              Mutually exclusive with `metric`.
+ *                                              Each validated: [a-zA-Z0-9_-]+
+ *                                              If single item: used directly in NATS subject.
+ *                                              If multiple: subject uses "*", filter client-side.
  * @param {Function} params.callback         - Required. Called with each data point.
  *
  * @throws {Error} If callback is not a function
- * @throws {Error} If heirarchy is provided and fails validation ([a-zA-Z0-9_.*>-]+)
+ * @throws {Error} If both metric and metrics are provided
+ * @throws {Error} If heirarchy is provided and fails wildcard validation
+ * @throws {Error} If ">" appears anywhere other than the last token
+ * @throws {Error} If metrics contains invalid ident characters
  * @throws {Error} If not connected
  *
- * @nats_subject import.{orgID}.{env}.heirarchy.listen.{groupID}
+ * @nats_subject import.{orgID}.{env}.heirarchy.listen.{metric_token}.{heirarchy_token}
  * @nats_type jetstream_consumer
  * @encoding msgpack (decode on receive)
  *
+ * @subject_construction
+ * metric_token:
+ *   - metric: "*"                     → "*"
+ *   - metrics: ["temperature"]        → "temperature" (single → direct in subject)
+ *   - metrics: ["temp", "humidity"]   → "*" (multiple → client-side filter)
+ *   - neither provided                → "*" (default: all metrics)
+ *
+ * heirarchy_token:
+ *   - params.heirarchy provided       → use params.heirarchy (wildcards allowed)
+ *   - params.heirarchy omitted        → use group.heirarchy (from wrapped group)
+ *
  * @callback_payload
  * {
- *     ident: string,                      // Device identifier
- *     data: { "<metric>": <value> }       // Metric key-value pairs
+ *     ident: string,        // Device identifier
+ *     metric: string,       // Metric name
+ *     value: any,           // Metric value
+ *     timestamp: number     // Unix timestamp
  * }
  *
  * @behavior
- * - Creates a JetStream consumer on the hierarchy group's listen subject
+ * - Constructs NATS subject with metric_token and heirarchy_token (server-side filtering)
+ * - Creates a JetStream consumer on the constructed subject
  * - Decodes msgpack payload
  * - Client-side filtering (applied in order):
  *   1. If device_idents provided: check if decoded ident is in the array
- *   2. If heirarchy provided: match the device's hierarchy path against
- *      the wildcard pattern using NATS topic pattern matching rules
- *      (same logic as Realtime class #topicPatternMatcher)
- * - Both filters must pass for callback to be invoked (AND logic)
- * - If no filters provided: invoke callback for all data
+ *   2. If metrics has multiple items: check if decoded metric is in the array
+ * - Both client-side filters must pass for callback to be invoked (AND logic)
  * - Consumer is cleaned up on disconnect()
  *
  * @returns {void}
@@ -290,25 +316,34 @@
  * @example
  * var group = await app.heirarchyGroup.get("<group_id>")
  *
- * // Filter by device and hierarchy
+ * // All metrics, all devices, group's stored hierarchy
  * group.stream({
- *     device_idents: ["sensor_01"],
- *     heirarchy: "building_a.*",
- *     callback: (data) => {
- *         console.log(`Device ${data.ident}:`, data.data)
- *     }
- * })
- *
- * // Filter by hierarchy only
- * group.stream({
- *     heirarchy: "building_a.>",
  *     callback: (data) => {
  *         console.log(data)
  *     }
  * })
  *
- * // No filters — receive all
+ * // Specific metric, override hierarchy with wildcard
  * group.stream({
+ *     metrics: ["temperature"],
+ *     heirarchy: "campus.building_a.*",
+ *     callback: (data) => {
+ *         console.log(data)
+ *     }
+ * })
+ *
+ * // Multiple metrics (client-side filter), filter by device
+ * group.stream({
+ *     device_idents: ["sensor_01"],
+ *     metrics: ["temperature", "humidity"],
+ *     callback: (data) => {
+ *         console.log(data)
+ *     }
+ * })
+ *
+ * // All metrics explicitly
+ * group.stream({
+ *     metric: "*",
  *     callback: (data) => {
  *         console.log(data)
  *     }

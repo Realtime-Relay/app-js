@@ -110,10 +110,13 @@
  * @behavior
  * - Deletes all active JetStream consumers (telemetry, events, presence, alerts, group streams)
  * - Clears device cache
+ * - Clears offline message buffer (discards any unsent buffered messages)
  * - Closes NATS connection via natsClient.close()
- * - Fires "disconnected" event via connection.listeners
- * - Resets internal connected state
- * - If natsClient is null, logs warning and returns
+ * - "disconnected" event is NOT emitted here — it is emitted by the
+ *   natsClient.closed() handler set up during connect(), which fires
+ *   when the underlying connection is fully closed
+ * - Resets internal connected state and connectCalled flag
+ * - If natsClient is null, returns (no-op)
  *
  * @returns {Promise<void>}
  *
@@ -142,13 +145,30 @@
  * - "reconnect_failed"  — Fired when max reconnect attempts exhausted
  *
  * @behavior
- * - Maps from NATS client status events:
- *     Events.Disconnect      → "disconnected"
- *     Events.Reconnect       → "reconnected"
- *     DebugEvents.Reconnecting → "reconnecting"
- *     Events.Error (NATS_PROTOCOL_ERR) → "auth_failed"
- *     maxReconnectAttempts exhausted → "reconnect_failed"
+ * - "disconnected" fires ONLY from natsClient.closed() — NOT from Events.Disconnect.
+ *   Events.Disconnect silently sets connected = false (transient network drop).
+ *   natsClient.closed() fires when the connection is fully terminated (clean close
+ *   or max reconnect attempts exhausted). This also resets connectCalled and
+ *   isReconnecting flags.
+ * - "reconnecting" fires ONCE on first DebugEvents.Reconnecting, then suppressed
+ *   until state returns to "reconnected" or "connected". Prevents repeated callbacks
+ *   on every reconnect attempt.
+ * - "reconnected" fires on Events.Reconnect, resets the reconnecting flag,
+ *   and flushes the offline message buffer (any commands/publishes queued
+ *   while disconnected are sent via JetStream).
+ * - "auth_failed" fires on Events.Error with NATS_PROTOCOL_ERR, then closes connection.
  * - Only one listener callback at a time. Calling again replaces previous.
+ *
+ * @offline_buffer
+ * - All JetStream publish calls go through ctx.publishOrBuffer()
+ * - If connected: attempts jetstream.publish() wrapped in try/catch
+ *   - On success: returns the JetStream ack
+ *   - On failure (TIMEOUT, disconnect race): catches error, buffers the message, returns null
+ * - If disconnected: buffers in ctx.offlineBuffer[], returns null
+ * - On reconnect: #flushOfflineBuffer() drains and publishes all buffered messages
+ * - On disconnect(): buffer is cleared (unsent messages are discarded)
+ * - Applies to: command.send, ephemeralEngine (fire, resolved, ack, ack_all)
+ * - NEVER throws — callers always get either an ack or null (buffered)
  *
  * @returns {void}
  *

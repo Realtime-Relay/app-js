@@ -47,6 +47,25 @@ export class RelayApp {
             natsClient: null,
             jetstream: null,
             connected: false,
+            offlineBuffer: [],
+
+            /**
+             * Publish via JetStream if connected, otherwise buffer for later.
+             * Returns ack if published, null if buffered.
+             */
+            async publishOrBuffer(subject, payload) {
+                if (ctx.connected && ctx.jetstream) {
+                    try {
+                        return await ctx.jetstream.publish(subject, payload);
+                    } catch (err) {
+                        // Publish failed (TIMEOUT, disconnect race) — buffer it
+                        ctx.offlineBuffer.push({ subject, payload });
+                        return null;
+                    }
+                }
+                ctx.offlineBuffer.push({ subject, payload });
+                return null;
+            },
         };
 
         // Initialize managers

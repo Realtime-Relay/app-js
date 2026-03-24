@@ -17,7 +17,7 @@ export class NotificationManager {
         const res = await this.#ctx.natsClient.request(
             this.#subject(op),
             this.#codec.encode(payload),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         return res.json();
     }

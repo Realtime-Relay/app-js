@@ -11,7 +11,6 @@ export class CommandManager {
     }
 
     async send(params) {
-        validateConnected(this.#ctx.connected);
         validateIdent(params.name, 'name');
         validateNonEmptyArray(params.device_ident, 'device_ident');
         if (params.data == null) {
@@ -23,24 +22,30 @@ export class CommandManager {
             validateIdent(ident, 'device_ident[]');
         }
 
-        // Resolve idents to device IDs
-        const deviceIds = await this.#ctx.device.resolveDeviceIds(params.device_ident);
+        // Resolve each ident individually to track found/unfound
+        const result = {};
+        for (const ident of params.device_ident) {
+            let deviceId;
+            try {
+                deviceId = await this.#ctx.device.resolveDeviceId(ident);
+            } catch {
+                result[ident] = { sent: false, error: 'Device not found' };
+                continue;
+            }
 
-        let allSuccess = true;
-        for (const deviceId of deviceIds) {
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.command.queue.${deviceId}.${params.name}`;
             const payload = msgpackEncode({
                 value: params.data,
                 timestamp: Date.now(),
             });
 
-            const ack = await this.#ctx.jetstream.publish(subject, payload);
-            if (ack == null) {
-                allSuccess = false;
-            }
+            const ack = await this.#ctx.publishOrBuffer(subject, payload);
+            result[ident] = ack != null
+                ? { sent: true }
+                : { sent: false, buffered: true };
         }
 
-        return allSuccess;
+        return result;
     }
 
     async history(params) {
@@ -49,9 +54,37 @@ export class CommandManager {
         validateNonEmptyArray(params.device_idents, 'device_idents');
         validateISO8601(params.start, 'start');
 
-        const end = params.end || new Date().toISOString();
+        for (const ident of params.device_idents) {
+            validateIdent(ident, 'device_idents[]');
+        }
 
-        const deviceIds = await this.#ctx.device.resolveDeviceIds(params.device_idents);
+        const end = params.end || new Date().toISOString();
+        if (params.end) {
+            validateISO8601(params.end, 'end');
+        }
+
+        // Resolve each ident individually to track found/unfound and build id→ident map
+        const idToIdent = {};
+        const deviceIds = [];
+        const unfound = [];
+
+        for (const ident of params.device_idents) {
+            try {
+                const id = await this.#ctx.device.resolveDeviceId(ident);
+                deviceIds.push(id);
+                idToIdent[id] = ident;
+            } catch {
+                unfound.push(ident);
+            }
+        }
+
+        if (deviceIds.length === 0) {
+            const result = {};
+            for (const ident of unfound) {
+                result[ident] = { error: 'Device not found' };
+            }
+            return result;
+        }
 
         const res = await this.#ctx.natsClient.request(
             `api.iot.db.${this.#ctx.orgID}.command.history`,
@@ -60,11 +93,27 @@ export class CommandManager {
                 env: this.#ctx.env,
                 command_name: params.name,
                 start: params.start,
-                end: end,
+                end,
             }),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
 
-        return res.json();
+        const decoded = this.#codec.decode(res.data);
+
+        // Remap device_id keys back to idents
+        const result = {};
+        if (decoded.data && typeof decoded.data === 'object') {
+            for (const [deviceId, records] of Object.entries(decoded.data)) {
+                const ident = idToIdent[deviceId] || deviceId;
+                result[ident] = records;
+            }
+        }
+
+        // Mark unfound idents
+        for (const ident of unfound) {
+            result[ident] = { error: 'Device not found' };
+        }
+
+        return result;
     }
 }

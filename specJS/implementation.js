@@ -1,4 +1,4 @@
-app = RelayApp({
+app = new RelayApp({
     api_key: "",
     secret: "",
     mode: "production" | "test"
@@ -254,6 +254,8 @@ var heirarchyGroup = await app.heirarchyGroup.get("<group_id>")
 heirarchyGroup.stream({
     device_idents: ["<ident_1>", ..], //optional for filtering
     heirarchy: "<wildcard_topic>", // optional for filtering
+    metrics: ["<metric_1>", ...], // metrics can't exist with metric
+    metric: "*", // metric can't exist with metrics
     callback: (data) => {
         
     }

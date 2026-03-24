@@ -16,6 +16,7 @@ export class ConnectionManager {
     #presenceCallback = null;
     #presenceConsumer = null;
     #connectCalled = false;
+    #isReconnecting = false;
 
     constructor(ctx) {
         this.#ctx = ctx;
@@ -48,7 +49,9 @@ export class ConnectionManager {
                 noEcho: true,
                 reconnect: true,
                 maxReconnectAttempts: 1200,
-                reconnectTimeWait: 1000,
+                reconnectTimeWait: 500,
+                maxPingOut: 2,
+                pingInterval: 5000,
                 authenticator: credsAuth,
                 token: this.#ctx.apiKey,
             });
@@ -74,6 +77,7 @@ export class ConnectionManager {
         this.#ctx.natsClient.closed().then(() => {
             this.#ctx.connected = false;
             this.#connectCalled = false;
+            this.#isReconnecting = false;
             this.#emitEvent('disconnected');
         });
     }
@@ -90,9 +94,9 @@ export class ConnectionManager {
         this.#ctx.connected = false;
         this.#connectCalled = false;
         this.#ctx.device.clearCache();
+        this.#ctx.offlineBuffer.length = 0;
 
         await this.#ctx.natsClient.close();
-        this.#emitEvent('disconnected');
     }
 
     async #startPresenceConsumer() {
@@ -132,14 +136,18 @@ export class ConnectionManager {
                 switch (s.type) {
                     case Events.Disconnect:
                         this.#ctx.connected = false;
-                        this.#emitEvent('disconnected');
                         break;
                     case Events.Reconnect:
                         this.#ctx.connected = true;
+                        this.#isReconnecting = false;
+                        this.#flushOfflineBuffer();
                         this.#emitEvent('reconnected');
                         break;
                     case DebugEvents.Reconnecting:
-                        this.#emitEvent('reconnecting');
+                        if (!this.#isReconnecting) {
+                            this.#isReconnecting = true;
+                            this.#emitEvent('reconnecting');
+                        }
                         break;
                     case Events.Error:
                         if (s.data === 'NATS_PROTOCOL_ERR') {
@@ -150,6 +158,17 @@ export class ConnectionManager {
                 }
             }
         })().catch(() => {});
+    }
+
+    async #flushOfflineBuffer() {
+        const messages = this.#ctx.offlineBuffer.splice(0);
+        for (const { subject, payload } of messages) {
+            try {
+                await this.#ctx.jetstream.publish(subject, payload);
+            } catch {
+                // If publish fails during flush, discard — connection may drop again
+            }
+        }
     }
 
     #emitEvent(event) {

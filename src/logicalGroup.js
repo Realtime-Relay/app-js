@@ -19,7 +19,7 @@ export class LogicalGroupManager {
         const res = await this.#ctx.natsClient.request(
             this.#subject(op),
             this.#codec.encode(payload),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         return res.json();
     }
@@ -45,7 +45,10 @@ export class LogicalGroupManager {
             tags: params.tags,
         });
 
-        return res;
+        if (res.data) {
+            return this.#wrapGroup(res.data);
+        }
+        return res.data;
     }
 
     async update(params) {
@@ -68,7 +71,11 @@ export class LogicalGroupManager {
             };
         }
 
-        return this.#request('update', payload);
+        const res = await this.#request('update', payload);
+        if (res.data) {
+            return this.#wrapGroup(res.data);
+        }
+        return res.data;
     }
 
     async delete(groupId) {
@@ -91,6 +98,7 @@ export class LogicalGroupManager {
 
         const res = await this.#request('get', { id: groupId });
         if (res.status === 'LOGICAL_GROUP_GET_SUCCESS') {
+            res.data.id = groupId
             return this.#wrapGroup(res.data);
         }
         return res;
@@ -103,7 +111,7 @@ export class LogicalGroupManager {
         const res = await this.#ctx.natsClient.request(
             `api.iot.cohort.${this.#ctx.orgID}.logical.device.list`,
             this.#codec.encode({ id: groupId }),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         const data = res.json();
         return data.data || [];

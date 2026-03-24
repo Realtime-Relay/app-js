@@ -7,11 +7,11 @@ function makeCtx(consumer) {
     const ctx = createMockContext({
         consumer,
         responses: {
-            'api.iot.cohort.test_org_123.heirarchy.create': { status: 'HEIRARCHY_GROUP_CREATE_SUCCESS' },
-            'api.iot.cohort.test_org_123.heirarchy.update': { status: 'HIERARCHY_GROUP_UPDATE_SUCCESS' },
+            'api.iot.cohort.test_org_123.heirarchy.create': { status: 'HEIRARCHY_GROUP_CREATE_SUCCESS', data: { id: 'hg_new', name: 'building_a', heirarchy: 'campus.building_a' } },
+            'api.iot.cohort.test_org_123.heirarchy.update': { status: 'HIERARCHY_GROUP_UPDATE_SUCCESS', data: { id: 'hg1', name: 'building_a', heirarchy: 'campus.building_a' } },
             'api.iot.cohort.test_org_123.heirarchy.delete': { status: 'HEIRARCHY_GROUP_DELETE_SUCCESS' },
-            'api.iot.cohort.test_org_123.heirarchy.list': { status: 'HEIRARCHY_GROUP_LIST_SUCCESS', data: [{ id: 'hg1', name: 'building_a' }] },
-            'api.iot.cohort.test_org_123.heirarchy.get': { status: 'HEIRARCHY_GROUP_GET_SUCCESS', data: { id: 'hg1', name: 'building_a' } },
+            'api.iot.cohort.test_org_123.heirarchy.list': { status: 'HEIRARCHY_GROUP_LIST_SUCCESS', data: [{ id: 'hg1', name: 'building_a', heirarchy: 'campus.building_a' }] },
+            'api.iot.cohort.test_org_123.heirarchy.get': { status: 'HEIRARCHY_GROUP_GET_SUCCESS', data: { id: 'hg1', name: 'building_a', heirarchy: 'campus.building_a' } },
             'api.iot.cohort.test_org_123.heirarchy.device.list': { status: 'HEIRARCHY_DEVICE_LIST_SUCCESS', data: [{ id: 'dev_1' }] },
         },
     });
@@ -26,8 +26,9 @@ describe('HeirarchyGroupManager', () => {
         it('sends correct subject with hierarchy name', async () => {
             const ctx = makeCtx();
             const hgm = new HeirarchyGroupManager(ctx);
-            const res = await hgm.create({ name: 'building_a', heirarchy: 'campus.building_a', device_idents: ['sensor_01'] });
-            expect(res.status).toBe('HEIRARCHY_GROUP_CREATE_SUCCESS');
+            const group = await hgm.create({ name: 'building_a', heirarchy: 'campus.building_a', device_idents: ['sensor_01'] });
+            expect(group.id).toBe('hg_new');
+            expect(typeof group.stream).toBe('function');
             const [subject] = ctx.natsClient.request.mock.calls[0];
             expect(subject).toBe('api.iot.cohort.test_org_123.heirarchy.create');
         });
@@ -95,7 +96,7 @@ describe('HeirarchyGroupManager', () => {
                 ([, opts]) => opts?.filter_subjects?.includes('heirarchy.listen')
             );
             expect(streamCall).toBeDefined();
-            expect(streamCall[1].filter_subjects).toBe('import.test_org_123.production.heirarchy.listen.hg1');
+            expect(streamCall[1].filter_subjects).toBe('import.test_org_123.production.heirarchy.listen.*.campus.building_a');
         });
 
         it('accepts wildcard hierarchy filter', async () => {

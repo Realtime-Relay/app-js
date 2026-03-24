@@ -21,15 +21,15 @@
  *                                         Validated: [a-zA-Z0-9_-]+
  * @param {string} params.name          - Required. RPC method name.
  *                                         Validated: [a-zA-Z0-9_-]+
- * @param {number} params.timeout       - Required. Timeout in seconds.
- *                                         Must be > 0.
+ * @param {number} [params.timeout]     - Optional. Timeout in seconds.
+ *                                         Defaults to 10s. Must be > 0 if provided.
  * @param {Object} params.data          - Required. RPC payload (arbitrary JSON).
  *
  * @throws {Error} If device_ident is null/undefined/empty
  * @throws {Error} If device_ident fails validation ([a-zA-Z0-9_-]+)
  * @throws {Error} If name is null/undefined/empty
  * @throws {Error} If name fails validation ([a-zA-Z0-9_-]+)
- * @throws {Error} If timeout is not a positive number
+ * @throws {Error} If timeout is provided and not a positive number
  * @throws {Error} If data is null/undefined
  * @throws {Error} If not connected
  * @throws {Error} On timeout (device offline or did not respond in time)

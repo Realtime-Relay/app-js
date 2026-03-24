@@ -1,7 +1,6 @@
 import { JSONCodec } from 'nats.ws';
 import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateHierarchyName, validateHierarchyWildcard, validateArray, validateFunction, validateConnected } from './validation.js';
-import { topicPatternMatcher } from './utils.js';
+import { validateIdent, validateHierarchyName, validateHierarchyWildcard, validateArray, validateFunction, validateConnected } from './validation.js';
 
 export class HeirarchyGroupManager {
     #ctx;
@@ -20,7 +19,7 @@ export class HeirarchyGroupManager {
         const res = await this.#ctx.natsClient.request(
             this.#subject(op),
             this.#codec.encode(payload),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         return res.json();
     }
@@ -28,7 +27,7 @@ export class HeirarchyGroupManager {
     #wrapGroup(data) {
         if (!data) return data;
         const group = { ...data };
-        group.stream = (params) => this.#streamGroup(data.id, params);
+        group.stream = (params) => this.#streamGroup(data.id, data.heirarchy, params);
         return group;
     }
 
@@ -40,11 +39,15 @@ export class HeirarchyGroupManager {
 
         const deviceIds = await this.#ctx.device.resolveDeviceIds(params.device_idents);
 
-        return this.#request('create', {
+        const res = await this.#request('create', {
             device_ids: deviceIds,
             name: params.name,
             heirarchy: params.heirarchy,
         });
+        if (res.data) {
+            return this.#wrapGroup(res.data);
+        }
+        return res.data;
     }
 
     async update(params) {
@@ -65,7 +68,11 @@ export class HeirarchyGroupManager {
             payload.heirarchy = params.heirarchy;
         }
 
-        return this.#request('update', payload);
+        const res = await this.#request('update', payload);
+        if (res.data) {
+            return this.#wrapGroup(res.data);
+        }
+        return res.data;
     }
 
     async delete(groupId) {
@@ -88,6 +95,7 @@ export class HeirarchyGroupManager {
 
         const res = await this.#request('get', { id: groupId });
         if (res.status === 'HEIRARCHY_GROUP_GET_SUCCESS') {
+            res.data.id = groupId
             return this.#wrapGroup(res.data);
         }
         return res;
@@ -100,21 +108,49 @@ export class HeirarchyGroupManager {
         const res = await this.#ctx.natsClient.request(
             `api.iot.cohort.${this.#ctx.orgID}.heirarchy.device.list`,
             this.#codec.encode({ id: groupId }),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         const data = res.json();
         return data.data || [];
     }
 
-    async #streamGroup(groupId, params) {
+    async #streamGroup(groupId, groupHeirarchy, params) {
         validateConnected(this.#ctx.connected);
         validateFunction(params.callback, 'callback');
+
+        // metric vs metrics — mutually exclusive
+        if (params.metric && params.metrics) {
+            throw new Error('metric and metrics are mutually exclusive');
+        }
 
         if (params.heirarchy) {
             validateHierarchyWildcard(params.heirarchy, 'heirarchy');
         }
 
-        const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.heirarchy.listen.${groupId}`;
+        if (params.metrics) {
+            validateArray(params.metrics, 'metrics');
+            for (const m of params.metrics) {
+                validateIdent(m, 'metrics[]');
+            }
+        }
+
+        // Determine metric token for NATS subject
+        let metricToken = '*'; // default: all metrics
+        let clientMetricFilter = null;
+
+        if (params.metric === '*') {
+            metricToken = '*';
+        } else if (params.metrics && params.metrics.length === 1) {
+            metricToken = params.metrics[0];
+        } else if (params.metrics && params.metrics.length > 1) {
+            metricToken = '*';
+            clientMetricFilter = params.metrics;
+        }
+
+        // Hierarchy token: param override or group's stored hierarchy
+        const heirarchyToken = params.heirarchy || groupHeirarchy;
+
+        const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.heirarchy.listen.${metricToken}.${heirarchyToken}`;
 
         const consumer = await this.#ctx.jetstream.consumers.get(
             `${this.#ctx.orgID}_stream`,
@@ -131,7 +167,6 @@ export class HeirarchyGroupManager {
         this.#streamConsumers.set(groupId, consumer);
 
         const filterIdents = params.device_idents || null;
-        const filterHierarchy = params.heirarchy || null;
 
         await consumer.consume({
             callback: async (msg) => {
@@ -139,14 +174,14 @@ export class HeirarchyGroupManager {
                 const data = msgpackDecode(msg.data);
                 msg.ack();
 
+                // Client-side device ident filter
                 if (filterIdents && !filterIdents.includes(data.ident)) {
                     return;
                 }
 
-                if (filterHierarchy && data.heirarchy) {
-                    if (!topicPatternMatcher(filterHierarchy, data.heirarchy)) {
-                        return;
-                    }
+                // Client-side metrics filter (only when multiple metrics specified)
+                if (clientMetricFilter && !clientMetricFilter.includes(data.metric)) {
+                    return;
                 }
 
                 params.callback(data);

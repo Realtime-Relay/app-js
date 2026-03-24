@@ -36,6 +36,12 @@ export function validateHierarchyWildcard(value, fieldName) {
     if (!HIERARCHY_WILDCARD_REGEX.test(value)) {
         throw new Error(`${fieldName} contains invalid characters. Allowed: a-z, A-Z, 0-9, _, -, ., *, >`);
     }
+    // ">" must only appear as the last token
+    const tokens = value.split('.');
+    const gtIndex = tokens.indexOf('>');
+    if (gtIndex !== -1 && gtIndex !== tokens.length - 1) {
+        throw new Error(`${fieldName} invalid: ">" can only be at the end of a topic`);
+    }
 }
 
 export function validateFunction(value, fieldName) {
@@ -85,7 +91,7 @@ export function validateISO8601(value, fieldName) {
         throw new Error(`${fieldName} must be a string`);
     }
     const d = new Date(value);
-    if (isNaN(d.getTime())) {
+    if (isNaN(d.getTime()) || d.toISOString() !== value) {
         throw new Error(`${fieldName} must be a valid ISO8601 datetime string`);
     }
 }

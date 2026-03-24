@@ -90,8 +90,8 @@
  *
  * @behavior
  * - Sends request to backend
- * - On success: adds device to local cache, returns device data
- * - On failure: returns failure response (does not throw)
+ * - On success: adds device to local cache, returns res.data (device object)
+ * - On failure: returns null
  * - Throws only on transport/timeout errors
  *
  * @returns {Promise<object>} Device object on success, failure response on business error
@@ -105,7 +105,7 @@
  */
 
 // ─────────────────────────────────────────────────────────────
-// app.device.update({ ident, schema, config })
+// app.device.update({ id, ident?, schema?, config? })
 // ─────────────────────────────────────────────────────────────
 
 /**
@@ -113,14 +113,12 @@
  * @description Updates an existing device's schema and/or config.
  *
  * @param {Object} params
- * @param {string} params.ident    - Required. Device identifier to update.
- *                                    Validated: [a-zA-Z0-9_-]+
+ * @param {string} params.id       - Required. Device ID.
+ * @param {string} [params.ident]  - Optional. New device identifier (rename).
  * @param {Object} [params.schema] - Optional. New device schema (must be valid JSON).
  * @param {Object} [params.config] - Optional. New device config (must be valid JSON).
  *
- * @throws {Error} If ident is null/undefined/empty
- * @throws {Error} If ident fails validation ([a-zA-Z0-9_-]+)
- * @throws {Error} If neither schema nor config is provided
+ * @throws {Error} If id is null/undefined/empty
  * @throws {Error} If not connected
  * @throws {Error} On transport/timeout failure
  *
@@ -130,7 +128,7 @@
  *
  * @request_payload
  * {
- *     id: string,          // Device ID (resolved from ident via cache)
+ *     id: string,          // Device ID (passed directly by caller)
  *     ident: string,       // Optional — only if renaming
  *     schema: object,      // Optional — new schema
  *     config: object       // Optional — new config
@@ -160,16 +158,16 @@
  * }
  *
  * @behavior
- * - Resolves ident to device ID via cache before sending request
- * - On success: updates device in local cache, returns device data
- * - On failure: returns failure response
+ * - Takes device ID directly (no ident-to-id resolution)
+ * - On success: updates device in local cache (keyed by ident), returns res.data.device
+ * - On failure: returns null
  * - Throws on transport/timeout errors
  *
- * @returns {Promise<object>} Updated device object on success
+ * @returns {Promise<object|null>} Updated device object on success, null on failure
  *
  * @example
  * var device = await app.device.update({
- *     ident: "sensor_01",
+ *     id: "69bffcb28cc30a4f716936bc",
  *     config: { report_interval: 60 }
  * })
  */

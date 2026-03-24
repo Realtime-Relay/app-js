@@ -48,7 +48,7 @@ describe('CommandManager', () => {
             );
         });
 
-        it('returns true when all acks succeed', async () => {
+        it('returns per-ident result with sent: true on success', async () => {
             const ctx = makeCtx();
             const cm = new CommandManager(ctx);
 
@@ -58,12 +58,12 @@ describe('CommandManager', () => {
                 data: { force: true },
             });
 
-            expect(result).toBe(true);
+            expect(result).toEqual({ sensor_01: { sent: true } });
         });
 
-        it('returns false when an ack is null', async () => {
+        it('buffers and returns sent: false when publish throws (TIMEOUT)', async () => {
             const ctx = makeCtx();
-            ctx.jetstream.publish = vi.fn(async () => null);
+            ctx.jetstream.publish = vi.fn(async () => { throw new Error('TIMEOUT'); });
             const cm = new CommandManager(ctx);
 
             const result = await cm.send({
@@ -72,46 +72,70 @@ describe('CommandManager', () => {
                 data: { force: true },
             });
 
-            expect(result).toBe(false);
+            expect(result).toEqual({ sensor_01: { sent: false, buffered: true } });
+            expect(ctx.offlineBuffer).toHaveLength(1);
+        });
+
+        it('skips unfound devices and marks them with error', async () => {
+            const ctx = makeCtx({
+                responses: {
+                    'api.iot.devices.test_org_123.get': {
+                        status: 'DEVICE_NOT_FOUND',
+                        data: {},
+                    },
+                },
+            });
+            // Only sensor_01 is in cache, sensor_99 is not
+            ctx.device.cache.delete('sensor_02');
+            const cm = new CommandManager(ctx);
+
+            const result = await cm.send({
+                name: 'reboot',
+                device_ident: ['sensor_01', 'sensor_99'],
+                data: { force: true },
+            });
+
+            expect(result.sensor_01).toEqual({ sent: true });
+            expect(result.sensor_99).toEqual({ sent: false, error: 'Device not found' });
+            // Only 1 publish call (for sensor_01)
+            expect(ctx.jetstream.publish).toHaveBeenCalledTimes(1);
         });
     });
 
     describe('history', () => {
-        it('sends request to correct subject', async () => {
+        it('sends single request with device_ids array', async () => {
             const ctx = makeCtx();
             const cm = new CommandManager(ctx);
 
-            await cm.history({
+            const result = await cm.history({
                 name: 'reboot',
-                device_idents: ['sensor_01'],
-                start: '2025-01-01T00:00:00Z',
-                end: '2025-01-02T00:00:00Z',
+                device_idents: ['sensor_01', 'sensor_02'],
+                start: '2025-01-01T00:00:00.000Z',
+                end: '2025-01-02T00:00:00.000Z',
             });
 
-            expect(ctx.natsClient.request).toHaveBeenCalledWith(
-                'api.iot.db.test_org_123.command.history',
-                expect.anything(),
-                { timeout: 5000 }
+            // Single request with all device_ids
+            const historyCalls = ctx.natsClient.request.mock.calls.filter(
+                ([subj]) => subj === 'api.iot.db.test_org_123.command.history'
             );
+            expect(historyCalls).toHaveLength(1);
+            expect(result).toBeDefined();
         });
 
         it('defaults end to now() if omitted', async () => {
             const ctx = makeCtx();
             const cm = new CommandManager(ctx);
 
-            const before = new Date().toISOString();
             await cm.history({
                 name: 'reboot',
                 device_idents: ['sensor_01'],
-                start: '2025-01-01T00:00:00Z',
+                start: '2025-01-01T00:00:00.000Z',
             });
-            const after = new Date().toISOString();
 
-            // Verify request was made (end is auto-filled)
             expect(ctx.natsClient.request).toHaveBeenCalledWith(
                 'api.iot.db.test_org_123.command.history',
                 expect.anything(),
-                { timeout: 5000 }
+                { timeout: 20000 }
             );
         });
     });
@@ -144,13 +168,21 @@ describe('CommandManager', () => {
             ).rejects.toThrow('data is required');
         });
 
-        it('throws when not connected', async () => {
+        it('buffers commands when not connected', async () => {
             const ctx = makeCtx({ connected: false });
             const cm = new CommandManager(ctx);
 
-            await expect(
-                cm.send({ name: 'reboot', device_ident: ['sensor_01'], data: {} })
-            ).rejects.toThrow('Not connected');
+            const result = await cm.send({
+                name: 'reboot',
+                device_ident: ['sensor_01'],
+                data: { force: true },
+            });
+
+            expect(result.sensor_01).toEqual({ sent: false, buffered: true });
+            expect(ctx.offlineBuffer).toHaveLength(1);
+            expect(ctx.offlineBuffer[0].subject).toBe(
+                'test_org_123.production.command.queue.dev_1.reboot'
+            );
         });
     });
 });

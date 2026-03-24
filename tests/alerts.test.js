@@ -69,6 +69,12 @@ describe('AlertManager', () => {
             const am = new AlertManager(ctx);
             expect(await am.delete('rule_1')).toBe(true);
         });
+
+        it('throws on empty id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+            await expect(am.delete('')).rejects.toThrow('id is required');
+        });
     });
 
     describe('list', () => {
@@ -95,8 +101,7 @@ describe('AlertManager', () => {
         it('sends ack request', async () => {
             const ctx = makeCtx();
             const am = new AlertManager(ctx);
-            const alert = { id: 'rule_1', config: { scope: { value: 'dev_1' } } };
-            const result = await am.ack({ alert, acked_by: 'operator_jane' });
+            const result = await am.ack({ device_id: 'dev_1', alert_id: 'rule_1', acked_by: 'operator_jane' });
             expect(result).toBe(true);
             const [subject] = ctx.natsClient.request.mock.calls[0];
             expect(subject).toBe('api.iot.alerts.test_org_123.ack');
@@ -105,7 +110,19 @@ describe('AlertManager', () => {
         it('throws on missing acked_by', async () => {
             const ctx = makeCtx();
             const am = new AlertManager(ctx);
-            await expect(am.ack({ alert: { id: 'x' } })).rejects.toThrow('acked_by');
+            await expect(am.ack({ device_id: 'dev_1', alert_id: 'x' })).rejects.toThrow('acked_by');
+        });
+
+        it('throws on missing device_id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+            await expect(am.ack({ alert_id: 'x', acked_by: 'op' })).rejects.toThrow('device_id');
+        });
+
+        it('throws on missing alert_id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+            await expect(am.ack({ device_id: 'dev_1', acked_by: 'op' })).rejects.toThrow('alert_id');
         });
     });
 
@@ -113,7 +130,7 @@ describe('AlertManager', () => {
         it('sends ack_all request', async () => {
             const ctx = makeCtx();
             const am = new AlertManager(ctx);
-            const result = await am.ackAll({ alert: { id: 'rule_1' }, acked_by: 'op' });
+            const result = await am.ackAll({ alert_id: 'rule_1', acked_by: 'op' });
             expect(result).toBe(true);
         });
     });
@@ -158,7 +175,7 @@ describe('AlertManager', () => {
     });
 
     describe('listen (non-ephemeral)', () => {
-        it('creates 4 JetStream consumers for alert events', async () => {
+        it('creates 1 wildcard JetStream consumer for all alert events', async () => {
             const consumer = createMockConsumer();
             const ctx = makeCtx(consumer);
             const am = new AlertManager(ctx);
@@ -171,17 +188,13 @@ describe('AlertManager', () => {
                 onAckAll: vi.fn(),
             });
 
-            // consumers.get called for: get request (mock) + 4 alert event consumers
             const alertCalls = ctx.jetstream.consumers.get.mock.calls.filter(
                 ([, opts]) => opts?.filter_subjects?.includes('alerts.listen')
             );
-            expect(alertCalls).toHaveLength(4);
-
-            const subjects = alertCalls.map(([, opts]) => opts.filter_subjects);
-            expect(subjects).toContain('import.test_org_123.production.alerts.listen.rule_1.fire');
-            expect(subjects).toContain('import.test_org_123.production.alerts.listen.rule_1.resolved');
-            expect(subjects).toContain('import.test_org_123.production.alerts.listen.rule_1.ack');
-            expect(subjects).toContain('import.test_org_123.production.alerts.listen.rule_1.ack_all');
+            expect(alertCalls).toHaveLength(1);
+            expect(alertCalls[0][1].filter_subjects).toBe(
+                'import.test_org_123.production.alerts.listen.rule_1.*'
+            );
         });
     });
 });

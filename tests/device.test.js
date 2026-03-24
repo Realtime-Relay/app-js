@@ -69,8 +69,7 @@ describe('DeviceManager', () => {
 
             // Payload is a Uint8Array from JSONCodec.encode()
             expect(payload).toBeDefined();
-            expect(res.status).toBe('DEVICE_CREATE_SUCCESS');
-            expect(res.data).toEqual(DEVICE_1);
+            expect(res).toEqual(DEVICE_1);
         });
 
         it('adds device to cache on success', async () => {
@@ -101,7 +100,7 @@ describe('DeviceManager', () => {
                 config: { interval: 30 },
             });
 
-            expect(res.status).toBe('DEVICE_CREATE_FAILED');
+            expect(res).toBeNull();
             expect(failDm.cache.has('sensor_01')).toBe(false);
         });
     });
@@ -109,27 +108,28 @@ describe('DeviceManager', () => {
     // ── update ────────────────────────────────────────────────
 
     describe('update', () => {
-        it('resolves ident to id and sends update request', async () => {
-            // Seed cache so resolveDeviceId finds it
-            await dm.list();
-
+        it('sends update request with provided id', async () => {
             const res = await dm.update({
+                id: 'dev_1',
                 ident: 'sensor_01',
                 config: { interval: 10 },
             });
 
-            expect(res.status).toBe('DEVICE_UPDATE_SUCCESS');
+            expect(res).toBeDefined();
+            expect(res.config).toEqual({ interval: 10 });
 
-            // Verify the update call used the resolved device id
             const updateCall = ctx.natsClient.request.mock.calls.find(
                 ([subj]) => subj === 'api.iot.devices.test_org_123.update'
             );
             expect(updateCall).toBeDefined();
         });
 
+        it('throws on missing id', async () => {
+            await expect(dm.update({ ident: 'sensor_01', config: {} })).rejects.toThrow('id is required');
+        });
+
         it('updates cache with returned device data', async () => {
-            await dm.list();
-            await dm.update({ ident: 'sensor_01', config: { interval: 10 } });
+            await dm.update({ id: 'dev_1', ident: 'sensor_01', config: { interval: 10 } });
 
             const cached = dm.cache.get('sensor_01');
             expect(cached.config).toEqual({ interval: 10 });

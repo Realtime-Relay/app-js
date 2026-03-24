@@ -7,8 +7,8 @@ function makeCtx(consumer, responseOverrides = {}) {
     const ctx = createMockContext({
         consumer,
         responses: {
-            'api.iot.cohort.test_org_123.logical.create': { status: 'LOGICAL_GROUP_CREATE_SUCCESS' },
-            'api.iot.cohort.test_org_123.logical.update': { status: 'LOGICAL_GROUP_UPDATE_SUCCESS' },
+            'api.iot.cohort.test_org_123.logical.create': { status: 'LOGICAL_GROUP_CREATE_SUCCESS', data: { id: 'g_new', name: 'floor_1' } },
+            'api.iot.cohort.test_org_123.logical.update': { status: 'LOGICAL_GROUP_UPDATE_SUCCESS', data: { id: 'g1', name: 'floor_1_updated' } },
             'api.iot.cohort.test_org_123.logical.delete': { status: 'LOGICAL_GROUP_DELETE_SUCCESS' },
             'api.iot.cohort.test_org_123.logical.list': { status: 'LOGICAL_GROUP_LIST_SUCCESS', data: [{ id: 'g1', name: 'floor_1' }] },
             'api.iot.cohort.test_org_123.logical.get': { status: 'LOGICAL_GROUP_GET_SUCCESS', data: { id: 'g1', name: 'floor_1' } },
@@ -28,8 +28,9 @@ describe('LogicalGroupManager', () => {
         it('resolves idents and sends correct subject', async () => {
             const ctx = makeCtx();
             const lgm = new LogicalGroupManager(ctx);
-            const res = await lgm.create({ name: 'floor_1', tags: ['temp'], device_idents: ['sensor_01'] });
-            expect(res.status).toBe('LOGICAL_GROUP_CREATE_SUCCESS');
+            const group = await lgm.create({ name: 'floor_1', tags: ['temp'], device_idents: ['sensor_01'] });
+            expect(group.id).toBe('g_new');
+            expect(typeof group.stream).toBe('function');
             const [subject] = ctx.natsClient.request.mock.calls[0];
             expect(subject).toBe('api.iot.cohort.test_org_123.logical.create');
         });
@@ -45,12 +46,13 @@ describe('LogicalGroupManager', () => {
         it('sends update request', async () => {
             const ctx = makeCtx();
             const lgm = new LogicalGroupManager(ctx);
-            const res = await lgm.update({
+            const group = await lgm.update({
                 id: 'g1',
                 tags: { add: ['humidity'], remove: [] },
                 devices: { add: ['sensor_02'], remove: [] },
             });
-            expect(res.status).toBe('LOGICAL_GROUP_UPDATE_SUCCESS');
+            expect(group.id).toBe('g1');
+            expect(typeof group.stream).toBe('function');
         });
     });
 

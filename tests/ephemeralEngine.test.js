@@ -123,10 +123,10 @@ describe('EphemeralEngine', () => {
             expect(ctx.jetstream.consumers.get).toHaveBeenCalled();
 
             const telemetryCall = ctx.jetstream.consumers.get.mock.calls.find(
-                ([, opts]) => opts?.filter_subjects?.includes('telemetry.sensor_01.cpu_usage')
+                ([, opts]) => opts?.filter_subjects?.includes('telemetry.dev_1.cpu_usage')
             );
             expect(telemetryCall).toBeDefined();
-            expect(telemetryCall[1].filter_subjects).toBe('test_org_123.production.telemetry.sensor_01.cpu_usage');
+            expect(telemetryCall[1].filter_subjects).toBe('test_org_123.production.telemetry.dev_1.cpu_usage');
 
             await engine.stop();
         });

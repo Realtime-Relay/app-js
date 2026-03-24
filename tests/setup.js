@@ -1,4 +1,7 @@
 import { vi } from 'vitest';
+import { JSONCodec } from 'nats.ws';
+
+const jc = JSONCodec();
 
 export function createMockConsumer(messages = []) {
     let consumeCallback = null;
@@ -73,12 +76,12 @@ export function createMockNatsClient(responses = {}) {
                 const payload = typeof responder === 'function' ? responder(data) : responder;
                 return {
                     json: () => payload,
-                    data: JSON.stringify(payload),
+                    data: jc.encode(payload),
                 };
             }
             return {
                 json: () => ({ status: 'UNKNOWN', data: {} }),
-                data: '{}',
+                data: jc.encode({ status: 'UNKNOWN', data: {} }),
             };
         }),
         publish: vi.fn(),
@@ -108,7 +111,7 @@ export function createMockContext(overrides = {}) {
     const natsClient = createMockNatsClient(overrides.responses || {});
     const jetstream = createMockJetStream(overrides.consumer);
 
-    return {
+    const ctx = {
         natsClient,
         jetstream,
         codec: createMockCodec(),
@@ -117,6 +120,22 @@ export function createMockContext(overrides = {}) {
         connected: overrides.connected !== undefined ? overrides.connected : true,
         deviceCache: overrides.deviceCache || new Map(),
         consumerMap: {},
+        offlineBuffer: [],
         ...overrides,
     };
+
+    ctx.publishOrBuffer = vi.fn(async (subject, payload) => {
+        if (ctx.connected && ctx.jetstream) {
+            try {
+                return await ctx.jetstream.publish(subject, payload);
+            } catch {
+                ctx.offlineBuffer.push({ subject, payload });
+                return null;
+            }
+        }
+        ctx.offlineBuffer.push({ subject, payload });
+        return null;
+    });
+
+    return ctx;
 }

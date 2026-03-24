@@ -33,7 +33,7 @@ export class DeviceManager {
         const res = await this.#ctx.natsClient.request(
             this.#subject(op),
             this.#codec.encode(payload),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         return res.json();
     }
@@ -56,12 +56,18 @@ export class DeviceManager {
     }
 
     /**
-     * Resolve multiple idents to device_ids.
+     * Resolve multiple idents to device_ids. Returns string[] of IDs.
+     * Skips idents that cannot be resolved.
      */
     async resolveDeviceIds(idents) {
         const ids = [];
         for (const ident of idents) {
-            ids.push(await this.resolveDeviceId(ident));
+            try {
+                const id = await this.resolveDeviceId(ident);
+                ids.push(id);
+            } catch {
+                // Skip unfound devices
+            }
         }
         return ids;
     }
@@ -81,18 +87,17 @@ export class DeviceManager {
 
         if (res.status === 'DEVICE_CREATE_SUCCESS') {
             this.#cache.set(params.ident, res.data);
+            return res.data;
         }
 
-        return res;
+        return null;
     }
 
     async update(params) {
         validateConnected(this.#ctx.connected);
-        validateIdent(params.ident, 'ident');
+        if (!params.id) throw new Error('id is required');
 
-        const deviceId = await this.resolveDeviceId(params.ident);
-
-        const payload = { id: deviceId };
+        const payload = { id: params.id };
         if (params.ident) payload.ident = params.ident;
         if (params.schema) payload.schema = params.schema;
         if (params.config) payload.config = params.config;
@@ -100,10 +105,14 @@ export class DeviceManager {
         const res = await this.#request('update', payload);
 
         if (res.status === 'DEVICE_UPDATE_SUCCESS') {
-            this.#cache.set(params.ident, res.data.device);
+            const device = res.data.device;
+            if (device?.ident) {
+                this.#cache.set(device.ident, device);
+            }
+            return res.data.device;
         }
 
-        return res;
+        return null;
     }
 
     async delete(ident) {

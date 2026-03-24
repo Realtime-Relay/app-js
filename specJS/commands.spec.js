@@ -27,11 +27,9 @@
  * @throws {Error} If device_ident is not a non-empty array
  * @throws {Error} If any device_ident fails validation ([a-zA-Z0-9_-]+)
  * @throws {Error} If data is null/undefined
- * @throws {Error} If not connected
- * @throws {Error} If device_ident resolution fails (device not found)
  *
  * @nats_subject {orgID}.{env}.command.queue.<device_id>.<command_name>
- * @nats_type publish (JetStream publish per device)
+ * @nats_type publish (JetStream publish per device, or buffered if offline)
  * @encoding msgpack
  *
  * @publish_payload (per device)
@@ -40,24 +38,36 @@
  *     timestamp: number      // Date.now() — unix ms timestamp
  * }
  *
+ * @offline_behavior
+ * - Uses ctx.publishOrBuffer() instead of direct jetstream.publish()
+ * - If connected: publishes immediately via JetStream
+ * - If disconnected: buffers the message in ctx.offlineBuffer[]
+ * - Buffered messages are flushed automatically on reconnect
+ * - Does NOT throw when disconnected — commands are queued
+ *
  * @behavior
  * - Resolves each device_ident to device_id via device cache
  *   (check local cache first, fallback to app.device.get() request)
- * - Loops through resolved device IDs
- * - For each device: msgpack encode payload, JetStream publish to command queue subject
- * - JetStream publish returns an ack object
- * - Returns true if ack != null (command was sent successfully)
- * - If any device ident cannot be resolved, throw error for that device
+ * - Unfound devices are SKIPPED (no publish), marked with error in result
+ * - For each found device: msgpack encode payload, publish or buffer
+ * - Returns a per-ident result map:
+ *     { sent: true }                              — ack received (online publish succeeded)
+ *     { sent: false, buffered: true }             — queued for later (offline OR publish failed/TIMEOUT)
+ *     { sent: false, error: "Device not found" }  — ident could not be resolved
  *
- * @returns {Promise<boolean>} true if all commands published successfully (all acks received)
+ * @returns {Promise<Object.<string, { sent: boolean, buffered?: boolean, error?: string }>>}
+ *          Map of ident → send result
  *
  * @example
- * var sent = await app.command.send({
+ * var result = await app.command.send({
  *     name: "reboot",
- *     device_ident: ["sensor_01", "sensor_02"],
+ *     device_ident: ["sensor_01", "sensor_99"],
  *     data: { force: true, delay: 5 }
  * })
- * // sent === true if all devices received the command
+ * // result === {
+ * //   "sensor_01": { sent: true },
+ * //   "sensor_99": { sent: false, error: "Device not found" }
+ * // }
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -67,7 +77,8 @@
 /**
  * @method command.history
  * @description Fetches historical command records for specific devices
- *              within a time range.
+ *              within a time range. Sends a single NATS request with all
+ *              resolved device_ids.
  *
  * @param {Object} params
  * @param {string}   params.name           - Required. Command name.
@@ -80,6 +91,7 @@
  * @throws {Error} If name is null/undefined/empty
  * @throws {Error} If device_idents is not a non-empty array
  * @throws {Error} If start is not a valid ISO8601 string
+ * @throws {Error} If end is provided and not a valid ISO8601 string
  * @throws {Error} If not connected
  * @throws {Error} On transport/timeout failure
  *
@@ -89,7 +101,7 @@
  *
  * @request_payload
  * {
- *     device_ids: string[],     // Resolved from device_idents via device cache
+ *     device_ids: string[],     // Only found device IDs (unfound are excluded)
  *     env: string,              // From app mode
  *     command_name: string,     // The command name
  *     start: string,            // ISO8601 datetime
@@ -97,10 +109,10 @@
  * }
  *
  * @response_payload
- * // Success:
+ * // Success (backend returns data keyed by device_id):
  * {
  *     status: "COMMAND_FETCH_SUCCESS",
- *     data: object              // Command history records
+ *     data: { "<device_id>": array }
  * }
  * // Failure:
  * {
@@ -110,18 +122,28 @@
  *
  * @behavior
  * - Resolves device_idents to device_ids via device cache
+ * - Unfound idents are SKIPPED from the request, marked with error in result
+ * - Sends a single NATS request with only found device_ids
+ * - If all idents are unfound, skips the request entirely
+ * - Remaps backend response keys from device_id → ident
  * - If end is not provided, defaults to current time: new Date().toISOString()
- * - Returns data on success
- * - Returns failure response on business logic error
+ * - Returns a per-ident map:
+ *     { "<ident>": [ ...records ] }                  — found device with history
+ *     { "<ident>": { error: "Device not found" } }   — ident could not be resolved
  * - Throws on transport/timeout error
  *
- * @returns {Promise<object>} Command history data
+ * @returns {Promise<Object.<string, (array|{ error: string })>>}
+ *          Map of ident → history records or error
  *
  * @example
  * var history = await app.command.history({
  *     name: "reboot",
- *     device_idents: ["sensor_01", "sensor_02"],
- *     start: "2026-01-01T00:00:00Z",
- *     end: "2026-01-02T00:00:00Z"
+ *     device_idents: ["sensor_01", "sensor_99"],
+ *     start: "2026-01-01T00:00:00.000Z",
+ *     end: "2026-01-02T00:00:00.000Z"
  * })
+ * // history === {
+ * //   "sensor_01": [ { value: {...}, time: "..." }, ... ],
+ * //   "sensor_99": { error: "Device not found" }
+ * // }
  */

@@ -21,7 +21,7 @@ export class AlertManager {
         const res = await this.#ctx.natsClient.request(
             this.#subject(op),
             this.#codec.encode(payload),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
         return res.json();
     }
@@ -82,11 +82,11 @@ export class AlertManager {
 
         const res = await this.#request('create', payload);
 
-        if (res.status === 'ALERT_CREATE_SUCCESS') {
+        if (res.data) {
             return this.#wrapAlert(res.data, config.evaluator || null);
         }
 
-        return res;
+        return null;
     }
 
     async update(config) {
@@ -95,18 +95,18 @@ export class AlertManager {
 
         const res = await this.#request('update', config);
 
-        if (res.status === 'ALERT_UPDATE_SUCCESS') {
+        if (res.data) {
             return this.#wrapAlert(res.data);
         }
 
         return res;
     }
 
-    async delete(alertName) {
+    async delete(alertId) {
         validateConnected(this.#ctx.connected);
-        if (!alertName) throw new Error('alertName is required');
+        if (!alertId) throw new Error('id is required');
 
-        const res = await this.#request('delete', { id: alertName });
+        const res = await this.#request('delete', { id: alertId });
         return res.status === 'ALERT_DELETE_SUCCESS';
     }
 
@@ -122,27 +122,28 @@ export class AlertManager {
 
         const res = await this.#request('get', { name: alertName });
 
-        if (res.status === 'ALERT_GET_SUCCESS') {
+        if (res.data) {
             return this.#wrapAlert(res.data);
         }
 
-        return res;
+        return null;
     }
 
     async ack(params) {
         validateConnected(this.#ctx.connected);
-        if (!params.alert) throw new Error('alert is required');
+        if (!params.device_id) throw new Error('device_id is required');
+        if (!params.alert_id) throw new Error('alert_id is required');
         if (!params.acked_by) throw new Error('acked_by is required');
 
         // Check if this is an ephemeral alert with a running engine
-        const engine = this.#ephemeralEngines.get(params.alert.id);
+        const engine = this.#ephemeralEngines.get(params.alert_id);
         if (engine) {
             return engine.ack(params.acked_by, params.ack_notes);
         }
 
         const res = await this.#request('ack', {
-            device_id: params.alert.config?.scope?.value,
-            rule_id: params.alert.id,
+            device_id: params.device_id,
+            rule_id: params.alert_id,
             acked_by: params.acked_by,
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
@@ -153,16 +154,16 @@ export class AlertManager {
 
     async ackAll(params) {
         validateConnected(this.#ctx.connected);
-        if (!params.alert) throw new Error('alert is required');
+        if (!params.alert_id) throw new Error('alert_id is required');
         if (!params.acked_by) throw new Error('acked_by is required');
 
-        const engine = this.#ephemeralEngines.get(params.alert.id);
+        const engine = this.#ephemeralEngines.get(params.alert_id);
         if (engine) {
             return engine.ackAll(params.acked_by, params.ack_notes);
         }
 
         const res = await this.#request('ack_all', {
-            rule_id: params.alert.id,
+            rule_id: params.alert_id,
             acked_by: params.acked_by,
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
@@ -211,49 +212,52 @@ export class AlertManager {
             return;
         }
 
-        // Non-ephemeral: subscribe to JetStream alert topics
+        // Non-ephemeral: single wildcard consumer for all alert events
         const ruleId = rule.id;
-        const baseSubject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${ruleId}`;
+        const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${ruleId}.*`;
 
-        const events = [
-            { suffix: 'fire', callback: callbacks.onFire },
-            { suffix: 'resolved', callback: callbacks.onResolved },
-            { suffix: 'ack', callback: callbacks.onAck },
-            { suffix: 'ack_all', callback: callbacks.onAckAll },
-        ];
+        const callbackMap = {
+            fire: callbacks.onFire,
+            resolved: callbacks.onResolved,
+            ack: callbacks.onAck,
+            ack_all: callbacks.onAckAll,
+        };
 
-        const consumers = [];
+        const consumer = await this.#ctx.jetstream.consumers.get(
+            `${this.#ctx.orgID}_stream`,
+            {
+                name: `appjs_alert_listen_${ruleId}_${crypto.randomUUID()}`,
+                filter_subjects: subject,
+                replay_policy: 'instant',
+                opt_start_time: new Date(),
+                ack_policy: 'explicit',
+                delivery_policy: 'new',
+            }
+        );
 
-        for (const { suffix, callback } of events) {
-            if (!callback) continue;
+        await consumer.consume({
+            callback: async (msg) => {
+                msg.working();
+                const data = msgpackDecode(msg.data);
+                msg.ack();
 
-            const subject = `${baseSubject}.${suffix}`;
+                // Extract last token from subject to determine event type
+                const tokens = msg.subject.split('.');
+                const eventType = tokens[tokens.length - 1];
+                const cb = callbackMap[eventType];
+                if (cb) cb(this.#transformTimestamp(data));
+            },
+        });
 
-            const consumer = await this.#ctx.jetstream.consumers.get(
-                `${this.#ctx.orgID}_stream`,
-                {
-                    name: `appjs_alert_listen_${ruleId}_${suffix}_${crypto.randomUUID()}`,
-                    filter_subjects: subject,
-                    replay_policy: 'instant',
-                    opt_start_time: new Date(),
-                    ack_policy: 'explicit',
-                    delivery_policy: 'new',
-                }
-            );
+        this.#listenConsumers.set(ruleId, [consumer]);
+    }
 
-            consumers.push(consumer);
-
-            await consumer.consume({
-                callback: async (msg) => {
-                    msg.working();
-                    const data = msgpackDecode(msg.data);
-                    msg.ack();
-                    callback(data);
-                },
-            });
+    #transformTimestamp(data) {
+        const transformed = { ...data };
+        if (typeof transformed.timestamp === 'number') {
+            transformed.timestamp = new Date(transformed.timestamp).toISOString();
         }
-
-        this.#listenConsumers.set(ruleId, consumers);
+        return transformed;
     }
 
     async deleteAllConsumers() {

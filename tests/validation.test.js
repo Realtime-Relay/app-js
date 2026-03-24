@@ -173,6 +173,18 @@ describe('validateHierarchyWildcard', () => {
     it('rejects non-string (boolean)', () => {
         expect(() => validateHierarchyWildcard(false, 'field')).toThrow(/must be a string/);
     });
+
+    it('rejects > not at end of topic', () => {
+        expect(() => validateHierarchyWildcard('a.>.b', 'field')).toThrow(/can only be at the end/);
+    });
+
+    it('rejects > in middle with more tokens', () => {
+        expect(() => validateHierarchyWildcard('>.a.b', 'field')).toThrow(/can only be at the end/);
+    });
+
+    it('accepts > as only token', () => {
+        expect(() => validateHierarchyWildcard('>', 'field')).not.toThrow();
+    });
 });
 
 describe('validateFunction', () => {
@@ -375,15 +387,19 @@ describe('validatePositiveNumber', () => {
 
 describe('validateISO8601', () => {
     it('accepts a valid ISO8601 date string', () => {
-        expect(() => validateISO8601('2024-01-15T10:30:00Z', 'field')).not.toThrow();
+        expect(() => validateISO8601('2024-01-15T10:30:00.000Z', 'field')).not.toThrow();
     });
 
-    it('accepts a date-only string', () => {
-        expect(() => validateISO8601('2024-01-15', 'field')).not.toThrow();
+    it('rejects a date-only string (no round-trip)', () => {
+        expect(() => validateISO8601('2024-01-15', 'field')).toThrow(/valid ISO8601/);
     });
 
-    it('accepts a datetime with timezone offset', () => {
-        expect(() => validateISO8601('2024-01-15T10:30:00+05:30', 'field')).not.toThrow();
+    it('rejects a datetime with timezone offset (no round-trip)', () => {
+        expect(() => validateISO8601('2024-01-15T10:30:00+05:30', 'field')).toThrow(/valid ISO8601/);
+    });
+
+    it('accepts a full ISO string with Z suffix', () => {
+        expect(() => validateISO8601('2024-01-15T10:30:00.000Z', 'field')).not.toThrow();
     });
 
     it('rejects an invalid date string', () => {

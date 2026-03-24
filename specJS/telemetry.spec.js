@@ -3,7 +3,7 @@
  * TELEMETRY SPEC — Telemetry Streaming + History
  * ============================================================
  *
- * Covers: app.telemetry.stream, app.telemetry.off, app.telemetry.history
+ * Covers: app.telemetry.stream, app.telemetry.off, app.telemetry.history, app.telemetry.latest
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -24,10 +24,11 @@
  * @throws {Error} If device_ident is null/undefined/empty
  * @throws {Error} If device_ident fails validation ([a-zA-Z0-9_-]+)
  * @throws {Error} If metric is null/undefined/empty
+ * @throws {Error} If metric is not "*" and not a key in device.schema
  * @throws {Error} If callback is not a function
  * @throws {Error} If not connected
  *
- * @nats_subject {orgID}.{env}.telemetry.<device_ident>.<metric>
+ * @nats_subject {orgID}.{env}.telemetry.<device_id>.<metric>
  * @nats_type jetstream_consumer
  * @encoding msgpack (decode on receive)
  *
@@ -38,11 +39,20 @@
  *     timestamp: number     // Unix timestamp (ms)
  * }
  *
+ * @metric_validation
+ * - Only two forms of metric are allowed:
+ *   1. "*" — subscribe to all metrics for the device
+ *   2. A specific metric name that MUST be a key in device.schema
+ * - If metric is not "*" and is not found in device.schema, throw Error
+ *   with message: 'metric "<name>" is not a valid key in device schema'
+ *
  * @behavior
- * - Creates a JetStream consumer for the specific device + metric subject
+ * - Validates metric against device.schema (fetched via device.get())
+ * - Resolves device_ident → device_id via device cache (local first, fallback to device.get())
+ * - Creates a JetStream consumer for the specific device_id + metric subject
  * - If metric is "*", subscribes to all metrics for the device
  * - Decodes msgpack payload on each message, invokes callback
- * - One consumer per device_ident + metric combination
+ * - One consumer per device_ident + metric combination (keyed by ident for user-facing tracking)
  * - If already subscribed to same device_ident + metric, return false (no duplicate)
  * - Consumer name format: appjs_telemetry_{device_ident}_{metric}_{uuid}
  *
@@ -121,6 +131,7 @@
  *
  * @throws {Error} If device_ident is null/undefined/empty
  * @throws {Error} If fields is not a non-empty array
+ * @throws {Error} If any field in fields is not a key in device.schema
  * @throws {Error} If start or end is not a valid ISO8601 string
  * @throws {Error} If start >= end (start must be before end)
  * @throws {Error} If not connected
@@ -164,7 +175,56 @@
  * var history = await app.telemetry.history({
  *     device_ident: "sensor_01",
  *     fields: ["temperature", "humidity"],
- *     start: "2026-01-01T00:00:00Z",
- *     end: "2026-01-02T00:00:00Z"
+ *     start: "2026-01-01T00:00:00.000Z",
+ *     end: "2026-01-02T00:00:00.000Z"
+ * })
+ */
+
+// ─────────────────────────────────────────────────────────────
+// app.telemetry.latest({ device_ident, fields })
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * @method telemetry.latest
+ * @description Convenience method that fetches telemetry history for
+ *              the last 24 hours (now - 1 day → now).
+ *
+ * @param {Object} params
+ * @param {string}   params.device_ident  - Required. Device identifier.
+ *                                           Validated: [a-zA-Z0-9_-]+
+ * @param {string[]} params.fields        - Required. Array of metric field names
+ *                                           (e.g., ["temperature", "humidity"]).
+ *
+ * @throws {Error} If device_ident is null/undefined/empty
+ * @throws {Error} If fields is not a non-empty array
+ * @throws {Error} If any field in fields is not a key in device.schema
+ * @throws {Error} If not connected
+ * @throws {Error} On transport/timeout failure
+ *
+ * @nats_subject api.iot.db.{orgID}.telemetry.history
+ * @nats_type request
+ * @encoding JSONCodec
+ *
+ * @request_payload
+ * {
+ *     device_id: string,     // Resolved from device_ident via device cache
+ *     env: string,           // From app mode ("production" | "test")
+ *     start: string,         // now() - 24 hours, ISO8601
+ *     end: string,           // now(), ISO8601
+ *     fields: string[]       // Metric field names (each must be a key in device.schema)
+ * }
+ *
+ * @behavior
+ * - Computes start = now() - 24h, end = now()
+ * - Resolves device_ident → device_id via device cache
+ * - Sends same request as history() with auto-computed time range
+ * - Returns the raw response from the backend
+ *
+ * @returns {Promise<object>} Telemetry history data for last 24 hours
+ *
+ * @example
+ * var latest = await app.telemetry.latest({
+ *     device_ident: "sensor_01",
+ *     fields: ["temperature", "humidity"]
  * })
  */

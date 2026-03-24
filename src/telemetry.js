@@ -19,12 +19,16 @@ export class TelemetryManager {
         }
         validateFunction(params.callback, 'callback');
 
+        // Validate metric against device schema
+        await this.#validateMetric(params.device_ident, params.metric);
+
         const key = `${params.device_ident}:${params.metric}`;
         if (this.#consumers.has(key)) {
             return false;
         }
 
-        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${params.device_ident}.${params.metric}`;
+        const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
+        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceId}.${params.metric}`;
 
         const consumer = await this.#ctx.jetstream.consumers.get(
             `${this.#ctx.orgID}_stream`,
@@ -80,6 +84,7 @@ export class TelemetryManager {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
         validateNonEmptyArray(params.fields, 'fields');
+        await this.#validateFields(params.device_ident, params.fields);
         validateISO8601(params.start, 'start');
         validateISO8601(params.end, 'end');
         validateStartBeforeEnd(params.start, params.end);
@@ -95,10 +100,66 @@ export class TelemetryManager {
                 end: params.end,
                 fields: params.fields,
             }),
-            { timeout: 5000 }
+            { timeout: 20000 }
         );
 
         return res.json();
+    }
+
+    async latest(params) {
+        validateConnected(this.#ctx.connected);
+        validateIdent(params.device_ident, 'device_ident');
+        validateNonEmptyArray(params.fields, 'fields');
+        await this.#validateFields(params.device_ident, params.fields);
+
+        const now = new Date();
+        const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+        const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
+
+        const res = await this.#ctx.natsClient.request(
+            `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+            this.#codec.encode({
+                device_id: deviceId,
+                env: this.#ctx.env,
+                start: oneDayAgo.toISOString(),
+                end: now.toISOString(),
+                fields: params.fields,
+            }),
+            { timeout: 20000 }
+        );
+
+        return res.json();
+    }
+
+    async #validateFields(deviceIdent, fields) {
+        let device = this.#ctx.device.cache.get(deviceIdent);
+        if (!device || !device.schema) {
+            device = await this.#ctx.device.get({ ident: deviceIdent });
+        }
+        if (!device || !device.schema) {
+            throw new Error(`Device ${deviceIdent} not found or has no schema`);
+        }
+        const invalid = fields.filter((f) => !(f in device.schema));
+        if (invalid.length > 0) {
+            throw new Error(`fields contain invalid metrics: ${invalid.join(', ')}. Valid keys: ${Object.keys(device.schema).join(', ')}`);
+        }
+    }
+
+    async #validateMetric(deviceIdent, metric) {
+        if (metric === '*') return;
+
+        // Check cache first, fallback to NATS request
+        let device = this.#ctx.device.cache.get(deviceIdent);
+        if (!device || !device.schema) {
+            device = await this.#ctx.device.get({ ident: deviceIdent });
+        }
+        if (!device || !device.schema) {
+            throw new Error(`Device ${deviceIdent} not found or has no schema`);
+        }
+        if (!(metric in device.schema)) {
+            throw new Error(`metric "${metric}" is not a valid key in device schema. Valid keys: ${Object.keys(device.schema).join(', ')}`);
+        }
     }
 
     async deleteAllConsumers() {
