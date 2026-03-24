@@ -80,20 +80,19 @@ ephAlert.setEvaluator((data) => {
 
 await ephAlert.listen({
     onFire: (data) => {
-        console.log('\n[FIRE]', JSON.stringify(data.rule, null, 2));
-        console.log('  Rolling state:', JSON.stringify(data.rolling_state, null, 2));
+        console.log('\n[FIRE]', JSON.stringify(data, null, 2));
     },
 
     onResolved: (data) => {
-        console.log('\n[RESOLVED]', JSON.stringify(data.rule, null, 2));
+        console.log('\n[RESOLVED]', JSON.stringify(data, null, 2));
     },
 
     onAck: (data) => {
-        console.log('\n[ACK]', data.ack);
+        console.log('\n[ACK]', data);
     },
 
     onAckAll: (data) => {
-        console.log('\n[ACK_ALL]', data.ack);
+        console.log('\n[ACK_ALL]', data);
     },
 
     onError: (err) => {
