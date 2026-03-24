@@ -3,7 +3,9 @@ import { validateIdent, validateObject, validateConnected } from './validation.j
 
 const CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours in ms
 
+
 export class DeviceManager {
+
     #ctx;
     #cache = new Map();     // ident -> device object
     #cacheTimestamp = 0;
@@ -35,32 +37,31 @@ export class DeviceManager {
             this.#codec.encode(payload),
             { timeout: 20000 }
         );
+
         return res.json();
     }
 
-    /**
-     * Resolve device_ident to device_id. Checks cache first, falls back to get().
-     */
+    // ─── Resolution ──────────────────────────────────────────
+
     async resolveDeviceId(ident) {
         // If cache has this specific ident, use it (regardless of global TTL)
         const cached = this.#cache.get(ident);
         if (cached && cached.id) {
             return cached.id;
         }
+
         // Fallback to NATS request
         const device = await this.get({ ident });
         if (device && device.id) {
             return device.id;
         }
+
         throw new Error(`Device not found: ${ident}`);
     }
 
-    /**
-     * Resolve multiple idents to device_ids. Returns string[] of IDs.
-     * Skips idents that cannot be resolved.
-     */
     async resolveDeviceIds(idents) {
         const ids = [];
+
         for (const ident of idents) {
             try {
                 const id = await this.resolveDeviceId(ident);
@@ -69,8 +70,11 @@ export class DeviceManager {
                 // Skip unfound devices
             }
         }
+
         return ids;
     }
+
+    // ─── CRUD ────────────────────────────────────────────────
 
     async create(params) {
         validateConnected(this.#ctx.connected);
@@ -95,6 +99,7 @@ export class DeviceManager {
 
     async update(params) {
         validateConnected(this.#ctx.connected);
+
         if (!params.id) throw new Error('id is required');
 
         const payload = { id: params.id };

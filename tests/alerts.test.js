@@ -21,6 +21,10 @@ function makeCtx(consumer, responseOverrides = {}) {
             'api.iot.alerts.test_org_123.ack': { status: 'ALERT_ACK_SUCCESS' },
             'api.iot.alerts.test_org_123.ack_all': { status: 'ALERT_ACK_SUCCESS' },
             'api.iot.alerts.test_org_123.mute': { status: 'ALERT_RULE_MUTE_SUCCESS', data: {} },
+            'api.iot.db.test_org_123.alerts.history': {
+                status: 'ALERT_FETCH_SUCCESS',
+                data: { fire: [{ timestamp: '2026-03-25T00:00:00.000Z', rule_id: 'rule_1' }], resolved: [] },
+            },
             ...responseOverrides,
         },
     });
@@ -162,6 +166,220 @@ describe('AlertManager', () => {
             const am = new AlertManager(ctx);
             const res = await am.unmute('rule_1');
             expect(res.status).toBe('ALERT_RULE_MUTE_SUCCESS');
+        });
+    });
+
+    describe('history', () => {
+        const validStart = '2026-03-01T00:00:00.000Z';
+        const validEnd = '2026-03-25T00:00:00.000Z';
+
+        it('fetches history by DEVICE', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            const result = await am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire', 'resolved'],
+                start: validStart,
+                end: validEnd,
+            });
+
+            expect(result.fire).toHaveLength(1);
+            expect(result.resolved).toHaveLength(0);
+
+            const [subject, data] = ctx.natsClient.request.mock.calls[0];
+            expect(subject).toBe('api.iot.db.test_org_123.alerts.history');
+        });
+
+        it('fetches history by RULE', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            const result = await am.history({
+                rule_type: 'RULE',
+                rule_id: 'rule_1',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            });
+
+            expect(result.fire).toHaveLength(1);
+        });
+
+        it('fetches history by RULE with optional device_ident', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            const result = await am.history({
+                rule_type: 'RULE',
+                rule_id: 'rule_1',
+                device_ident: 'sensor_01',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            });
+
+            expect(result.fire).toHaveLength(1);
+        });
+
+        it('resolves device_ident to device_id in payload', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            });
+
+            const [, rawData] = ctx.natsClient.request.mock.calls[0];
+            const payload = JSON.parse(new TextDecoder().decode(rawData));
+            expect(payload.device_id).toBe('dev_1');
+            expect(payload.rule_type).toBe('DEVICE');
+        });
+
+        it('throws if rule_type is missing', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('rule_type is required');
+        });
+
+        it('throws if rule_type is invalid', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'INVALID',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('DEVICE or RULE');
+        });
+
+        it('throws if DEVICE but no device_ident', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('device_ident is required');
+        });
+
+        it('throws if RULE but no rule_id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'RULE',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('rule_id is required');
+        });
+
+        it('throws if rule_states is empty', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: [],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('non-empty array');
+        });
+
+        it('throws if rule_states contains invalid values', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire', 'invalid_state'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('invalid values');
+        });
+
+        it('throws if rule_states includes ack without rule_id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire', 'ack'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('rule_id is required when rule_states includes ack or ack_all');
+        });
+
+        it('throws if rule_states includes ack_all without rule_id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['ack_all'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('rule_id is required when rule_states includes ack or ack_all');
+        });
+
+        it('allows ack with rule_id present', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            const result = await am.history({
+                rule_type: 'RULE',
+                rule_id: 'rule_1',
+                rule_states: ['ack', 'ack_all'],
+                start: validStart,
+                end: validEnd,
+            });
+
+            expect(result.fire).toHaveLength(1);
+        });
+
+        it('throws if start >= end', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire'],
+                start: validEnd,
+                end: validStart,
+            })).rejects.toThrow('start must be before end');
+        });
+
+        it('throws if not connected', async () => {
+            const ctx = makeCtx();
+            ctx.connected = false;
+            const am = new AlertManager(ctx);
+
+            await expect(am.history({
+                rule_type: 'DEVICE',
+                device_ident: 'sensor_01',
+                rule_states: ['fire'],
+                start: validStart,
+                end: validEnd,
+            })).rejects.toThrow('Not connected');
         });
     });
 

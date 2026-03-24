@@ -2,7 +2,9 @@ import { JSONCodec } from 'nats.ws';
 import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { validateIdent, validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
 
+
 export class TelemetryManager {
+
     #ctx;
     #consumers = new Map(); // key: `${device_ident}:${metric}` -> consumer
     #codec = JSONCodec();
@@ -11,18 +13,23 @@ export class TelemetryManager {
         this.#ctx = ctx;
     }
 
+    // ─── Streaming ───────────────────────────────────────────
+
     async stream(params) {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
+
         if (params.metric == null || params.metric === '') {
             throw new Error('metric is required');
         }
+
         validateFunction(params.callback, 'callback');
 
         // Validate metric against device schema
         await this.#validateMetric(params.device_ident, params.metric);
 
         const key = `${params.device_ident}:${params.metric}`;
+
         if (this.#consumers.has(key)) {
             return false;
         }
@@ -49,6 +56,7 @@ export class TelemetryManager {
                 msg.working();
                 const data = msgpackDecode(msg.data);
                 msg.ack();
+
                 params.callback(data);
             },
         });
@@ -61,9 +69,11 @@ export class TelemetryManager {
 
         if (params.metric !== undefined) {
             validateArray(params.metric, 'metric');
+
             for (const m of params.metric) {
                 const key = `${params.device_ident}:${m}`;
                 const consumer = this.#consumers.get(key);
+
                 if (consumer) {
                     await consumer.delete();
                     this.#consumers.delete(key);
@@ -80,11 +90,15 @@ export class TelemetryManager {
         }
     }
 
+    // ─── History ─────────────────────────────────────────────
+
     async history(params) {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
         validateNonEmptyArray(params.fields, 'fields');
+
         await this.#validateFields(params.device_ident, params.fields);
+
         validateISO8601(params.start, 'start');
         validateISO8601(params.end, 'end');
         validateStartBeforeEnd(params.start, params.end);
@@ -110,6 +124,7 @@ export class TelemetryManager {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
         validateNonEmptyArray(params.fields, 'fields');
+
         await this.#validateFields(params.device_ident, params.fields);
 
         const now = new Date();
@@ -132,15 +147,21 @@ export class TelemetryManager {
         return res.json();
     }
 
+    // ─── Validation ──────────────────────────────────────────
+
     async #validateFields(deviceIdent, fields) {
         let device = this.#ctx.device.cache.get(deviceIdent);
+
         if (!device || !device.schema) {
             device = await this.#ctx.device.get({ ident: deviceIdent });
         }
+
         if (!device || !device.schema) {
             throw new Error(`Device ${deviceIdent} not found or has no schema`);
         }
+
         const invalid = fields.filter((f) => !(f in device.schema));
+
         if (invalid.length > 0) {
             throw new Error(`fields contain invalid metrics: ${invalid.join(', ')}. Valid keys: ${Object.keys(device.schema).join(', ')}`);
         }
@@ -151,21 +172,27 @@ export class TelemetryManager {
 
         // Check cache first, fallback to NATS request
         let device = this.#ctx.device.cache.get(deviceIdent);
+
         if (!device || !device.schema) {
             device = await this.#ctx.device.get({ ident: deviceIdent });
         }
+
         if (!device || !device.schema) {
             throw new Error(`Device ${deviceIdent} not found or has no schema`);
         }
+
         if (!(metric in device.schema)) {
             throw new Error(`metric "${metric}" is not a valid key in device schema. Valid keys: ${Object.keys(device.schema).join(', ')}`);
         }
     }
 
+    // ─── Cleanup ─────────────────────────────────────────────
+
     async deleteAllConsumers() {
         for (const [key, consumer] of this.#consumers) {
             await consumer.delete();
         }
+
         this.#consumers.clear();
     }
 }

@@ -11,7 +11,9 @@ const SERVERS = [
     'wss://api.relay-x.io:4423',
 ];
 
+
 export class ConnectionManager {
+
     #ctx;
     #listenerCallback = null;
     #presenceCallback = null;
@@ -30,9 +32,11 @@ export class ConnectionManager {
 
     async presence(callback) {
         validateFunction(callback, 'callback');
+
         if (!this.#ctx.connected) {
             throw new Error('Not connected. Call app.connect() first.');
         }
+
         this.#presenceCallback = callback;
         await this.#startPresenceConsumer();
     }
@@ -110,6 +114,8 @@ export class ConnectionManager {
         await this.#ctx.natsClient.close();
     }
 
+    // ─── Presence Consumer ───────────────────────────────────
+
     async #startPresenceConsumer() {
         if (this.#presenceConsumer) {
             await this.#presenceConsumer.delete();
@@ -134,12 +140,15 @@ export class ConnectionManager {
                 msg.working();
                 const data = msgpackDecode(msg.data);
                 msg.ack();
+
                 if (this.#presenceCallback) {
                     this.#presenceCallback(data);
                 }
             },
         });
     }
+
+    // ─── Connection Monitoring ───────────────────────────────
 
     async #monitorStatus() {
         (async () => {
@@ -148,18 +157,21 @@ export class ConnectionManager {
                     case Events.Disconnect:
                         this.#ctx.connected = false;
                         break;
+
                     case Events.Reconnect:
                         this.#ctx.connected = true;
                         this.#isReconnecting = false;
                         this.#flushOfflineBuffer();
                         this.#emitEvent('reconnected');
                         break;
+
                     case DebugEvents.Reconnecting:
                         if (!this.#isReconnecting) {
                             this.#isReconnecting = true;
                             this.#emitEvent('reconnecting');
                         }
                         break;
+
                     case Events.Error:
                         if (s.data === 'NATS_PROTOCOL_ERR') {
                             this.#emitEvent('auth_failed');
@@ -171,8 +183,11 @@ export class ConnectionManager {
         })().catch(() => {});
     }
 
+    // ─── Offline Buffer ──────────────────────────────────────
+
     async #flushOfflineBuffer() {
         const messages = this.#ctx.offlineBuffer.splice(0);
+
         for (const { subject, payload } of messages) {
             try {
                 await this.#ctx.jetstream.publish(subject, payload);

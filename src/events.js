@@ -1,7 +1,9 @@
 import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { validateIdent, validateFunction, validateConnected } from './validation.js';
 
+
 export class EventManager {
+
     #ctx;
     #consumers = new Map(); // event_name -> consumer
     #callbacks = new Map(); // event_name -> callback
@@ -41,6 +43,7 @@ export class EventManager {
                 msg.working();
                 const data = msgpackDecode(msg.data);
                 msg.ack();
+
                 const cb = this.#callbacks.get(params.name);
                 if (cb) cb(data);
             },
@@ -53,6 +56,7 @@ export class EventManager {
         validateIdent(params.name, 'name');
 
         const consumer = this.#consumers.get(params.name);
+
         if (consumer) {
             await consumer.delete();
             this.#consumers.delete(params.name);
@@ -64,6 +68,7 @@ export class EventManager {
         for (const [, consumer] of this.#consumers) {
             await consumer.delete();
         }
+
         this.#consumers.clear();
         this.#callbacks.clear();
     }

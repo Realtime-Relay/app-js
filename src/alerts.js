@@ -1,11 +1,15 @@
 import { JSONCodec } from 'nats.ws';
-import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateIdent, validateConnected, validateFunction, validatePositiveNumber } from './validation.js';
-import { EphemeralEngine } from './ephemeralEngine.js';
+import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { validateIdent, validateConnected, validateFunction, validatePositiveNumber, validateNonEmptyArray, validateISO8601, validateStartBeforeEnd } from './validation.js';
+import { EphemeralEngine } from './ephemeral_alerting/index.js';
 
 const VALID_SOURCES = ['TELEMETRY', 'COMMAND', 'EVENT'];
+const VALID_RULE_TYPES = ['DEVICE', 'RULE'];
+const VALID_RULE_STATES = ['fire', 'resolved', 'ack', 'ack_all'];
+
 
 export class AlertManager {
+
     #ctx;
     #codec = JSONCodec();
     #listenConsumers = new Map();     // ruleId -> consumer[]
@@ -26,6 +30,7 @@ export class AlertManager {
             this.#codec.encode(payload),
             { timeout: 20000 }
         );
+
         return res.json();
     }
 
@@ -33,6 +38,7 @@ export class AlertManager {
 
     #wrapAlert(data) {
         if (!data) return data;
+
         const alert = { ...data };
 
         // Track metadata
@@ -55,6 +61,7 @@ export class AlertManager {
 
     #wrapEphemeralAlert(data) {
         if (!data) return data;
+
         const alert = { ...data };
 
         // Track metadata
@@ -107,6 +114,7 @@ export class AlertManager {
         };
 
         const res = await this.#request('create', payload);
+
         if (res.data) return this.#wrapAlert(res.data);
         return null;
     }
@@ -117,11 +125,14 @@ export class AlertManager {
 
         if (!config.config) throw new Error('config is required');
         if (!config.config.topic) throw new Error('config.topic is required');
+
         if (!VALID_SOURCES.includes(config.config.topic.source)) {
             throw new Error('config.topic.source must be TELEMETRY, COMMAND, or EVENT');
         }
+
         if (!config.config.topic.device_ident) throw new Error('config.topic.device_ident is required');
         if (!config.config.topic.last_token) throw new Error('config.topic.last_token is required');
+
         validatePositiveNumber(config.config.duration, 'config.duration');
         validatePositiveNumber(config.config.recovery_duration, 'config.recovery_duration');
 
@@ -130,33 +141,45 @@ export class AlertManager {
             description: config.description,
             config: config.config,
             notification_channel: config.notification_channel || [],
+            type: 'EPHEMERAL',
+            env: this.#ctx.env,
         };
 
         const res = await this.#request('create_ephemeral', payload);
+
         if (res.data) return this.#wrapEphemeralAlert(res.data);
         return null;
     }
 
     async update(config) {
         validateConnected(this.#ctx.connected);
+
         if (!config.id) throw new Error('id is required');
 
         const res = await this.#request('update', config);
+
         if (res.data) return this.#wrapAlert(res.data);
         return res;
     }
 
     async updateEphemeral(config) {
         validateConnected(this.#ctx.connected);
+
         if (!config.id) throw new Error('id is required');
 
-        const res = await this.#request('update_ephemeral', config);
+        const res = await this.#request('update_ephemeral', {
+            ...config,
+            type: 'EPHEMERAL',
+            env: this.#ctx.env,
+        });
+
         if (res.data) return this.#wrapEphemeralAlert(res.data);
         return null;
     }
 
     async delete(alertId) {
         validateConnected(this.#ctx.connected);
+
         if (!alertId) throw new Error('id is required');
 
         // Clean up engine if exists
@@ -168,19 +191,23 @@ export class AlertManager {
         this.#alertMetadata.delete(alertId);
 
         const res = await this.#request('delete', { id: alertId });
+
         return res.status === 'ALERT_DELETE_SUCCESS';
     }
 
     async list() {
         validateConnected(this.#ctx.connected);
+
         const res = await this.#request('list', {});
         const alerts = res.data || [];
+
         // Track metadata for all listed alerts
         for (const a of alerts) {
             if (a.id) {
                 this.#alertMetadata.set(a.id, { type: a.type || 'THRESHOLD' });
             }
         }
+
         return alerts;
     }
 
@@ -189,6 +216,7 @@ export class AlertManager {
         validateIdent(alertName, 'alertName');
 
         const res = await this.#request('get', { name: alertName });
+
         if (!res.data) return null;
 
         // Track metadata
@@ -200,13 +228,85 @@ export class AlertManager {
         if (res.data.type === 'EPHEMERAL') {
             return this.#wrapEphemeralAlert(res.data);
         }
+
         return this.#wrapAlert(res.data);
+    }
+
+    // ─── History ──────────────────────────────────────────────
+
+    async history(params) {
+        validateConnected(this.#ctx.connected);
+
+        if (!params.rule_type) throw new Error('rule_type is required');
+
+        if (!VALID_RULE_TYPES.includes(params.rule_type)) {
+            throw new Error('rule_type must be DEVICE or RULE');
+        }
+
+        if (params.rule_type === 'DEVICE') {
+            if (!params.device_ident) throw new Error('device_ident is required for rule_type DEVICE');
+        }
+
+        if (params.rule_type === 'RULE') {
+            if (!params.rule_id) throw new Error('rule_id is required for rule_type RULE');
+        }
+
+        validateNonEmptyArray(params.rule_states, 'rule_states');
+
+        const invalidStates = params.rule_states.filter(s => !VALID_RULE_STATES.includes(s));
+
+        if (invalidStates.length > 0) {
+            throw new Error(`rule_states contains invalid values: ${invalidStates.join(', ')}. Valid values: ${VALID_RULE_STATES.join(', ')}`);
+        }
+
+        // ack and ack_all require rule_id
+        const needsRuleId = params.rule_states.some(s => s === 'ack' || s === 'ack_all');
+
+        if (needsRuleId && !params.rule_id) {
+            throw new Error('rule_id is required when rule_states includes ack or ack_all');
+        }
+
+        validateISO8601(params.start, 'start');
+        validateISO8601(params.end, 'end');
+        validateStartBeforeEnd(params.start, params.end);
+
+        const payload = {
+            rule_type: params.rule_type,
+            env: this.#ctx.env,
+            rule_states: params.rule_states,
+            start: params.start,
+            end: params.end,
+        };
+
+        // Resolve device_ident to device_id
+        if (params.device_ident) {
+            payload.device_id = await this.#ctx.device.resolveDeviceId(params.device_ident);
+        }
+
+        if (params.rule_type === 'RULE') {
+            payload.rule_id = params.rule_id;
+        }
+
+        const res = await this.#ctx.natsClient.request(
+            `api.iot.db.${this.#ctx.orgID}.alerts.history`,
+            this.#codec.encode(payload),
+            { timeout: 20000 }
+        );
+
+        const decoded = this.#codec.decode(res.data);
+
+        if (decoded.status === 'ALERT_FETCH_SUCCESS') {
+            return decoded.data;
+        }
+
+        return decoded;
     }
 
     // ─── Ack / AckAll ────────────────────────────────────────
 
     async ack(params) {
         validateConnected(this.#ctx.connected);
+
         if (!params.device_id) throw new Error('device_id is required');
         if (!params.alert_id) throw new Error('alert_id is required');
         if (!params.acked_by) throw new Error('acked_by is required');
@@ -221,11 +321,21 @@ export class AlertManager {
         const meta = this.#alertMetadata.get(params.alert_id);
         if (meta?.type === 'EPHEMERAL') {
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack`;
+
             const res = await this.#ctx.natsClient.request(
                 subject,
-                this.#codec.encode(params),
+                msgpackEncode({
+                    status: "acknowledged",
+                    device_id: params.device_id,
+                    ack: {
+                        acked_by: params.acked_by,
+                        ack_notes: params.ack_notes,
+                        acked_at: Date.now()
+                    }
+                }),
                 { timeout: 10000 }
             );
+
             const data = res.json();
             return data.status === 'ACK_SUCCESS';
         }
@@ -238,11 +348,13 @@ export class AlertManager {
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
         });
+
         return res.status === 'ALERT_ACK_SUCCESS';
     }
 
     async ackAll(params) {
         validateConnected(this.#ctx.connected);
+
         if (!params.alert_id) throw new Error('alert_id is required');
         if (!params.acked_by) throw new Error('acked_by is required');
 
@@ -254,11 +366,20 @@ export class AlertManager {
         const meta = this.#alertMetadata.get(params.alert_id);
         if (meta?.type === 'EPHEMERAL') {
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack_all`;
+
             const res = await this.#ctx.natsClient.request(
                 subject,
-                this.#codec.encode(params),
+                msgpackEncode({
+                    status: "acknowledged",
+                    ack: {
+                        acked_by: params.acked_by,
+                        ack_notes: params.ack_notes,
+                        acked_at: Date.now()
+                    }
+                }),
                 { timeout: 10000 }
             );
+
             const data = res.json();
             return data.status === 'ACK_SUCCESS';
         }
@@ -269,6 +390,7 @@ export class AlertManager {
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
         });
+
         return res.status === 'ALERT_ACK_SUCCESS';
     }
 
@@ -276,11 +398,14 @@ export class AlertManager {
 
     async mute(params) {
         validateConnected(this.#ctx.connected);
+
         if (!params.id) throw new Error('id is required');
         if (!params.mute_config) throw new Error('mute_config is required');
+
         if (!['FOREVER', 'TIME_BASED'].includes(params.mute_config.type)) {
             throw new Error('mute_config.type must be FOREVER or TIME_BASED');
         }
+
         if (params.mute_config.type === 'TIME_BASED' && !params.mute_config.mute_till) {
             throw new Error('mute_till is required for TIME_BASED mute');
         }
@@ -289,11 +414,13 @@ export class AlertManager {
         const meta = this.#alertMetadata.get(params.id);
         if (meta?.type === 'EPHEMERAL') {
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.id}.mute`;
+
             const res = await this.#ctx.natsClient.request(
                 subject,
-                this.#codec.encode({ mute_config: params.mute_config }),
+                msgpackEncode({ mute_config: params.mute_config }),
                 { timeout: 10000 }
             );
+
             return res.json();
         }
 
@@ -301,6 +428,7 @@ export class AlertManager {
             rule_id: params.id,
             type: params.mute_config.type,
         };
+
         if (params.mute_config.type === 'TIME_BASED') {
             payload.mute_till = params.mute_config.mute_till;
         }
@@ -310,17 +438,20 @@ export class AlertManager {
 
     async unmute(id) {
         validateConnected(this.#ctx.connected);
+
         if (!id) throw new Error('id is required');
 
         // Ephemeral — RPC to owner via same 'mute' endpoint with type=CLEAR
         const meta = this.#alertMetadata.get(id);
         if (meta?.type === 'EPHEMERAL') {
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${id}.mute`;
+
             const res = await this.#ctx.natsClient.request(
                 subject,
-                this.#codec.encode({ mute_config: { type: 'CLEAR' } }),
+                msgpackEncode({ mute_config: { type: 'CLEAR' } }),
                 { timeout: 10000 }
             );
+
             return res.json();
         }
 
@@ -363,6 +494,7 @@ export class AlertManager {
                 const tokens = msg.subject.split('.');
                 const eventType = tokens[tokens.length - 1];
                 const cb = callbackMap[eventType];
+
                 if (cb) cb(this.#transformTimestamp(data));
             },
         });
@@ -372,9 +504,11 @@ export class AlertManager {
 
     #transformTimestamp(data) {
         const transformed = { ...data };
+
         if (typeof transformed.timestamp === 'number') {
             transformed.timestamp = new Date(transformed.timestamp).toISOString();
         }
+
         return transformed;
     }
 

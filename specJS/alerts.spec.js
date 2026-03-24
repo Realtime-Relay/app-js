@@ -292,6 +292,91 @@
  */
 
 // ─────────────────────────────────────────────────────────────
+// app.alert.history(params)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * @method alert.history
+ * @description Fetches historical alert events (fire, resolved, ack, ack_all)
+ *              from the backend. Supports two query modes:
+ *              - DEVICE: query by device (device_ident required)
+ *              - RULE: query by rule_id (device_ident optional)
+ *
+ * @param {Object}   params
+ * @param {string}   params.rule_type       - Required. "DEVICE" | "RULE"
+ * @param {string}   [params.device_ident]  - Required for DEVICE, optional for RULE.
+ *                                             Resolved to device_id internally.
+ * @param {string}   [params.rule_id]       - Required for RULE. Raw alert rule ID.
+ * @param {string[]} params.rule_states     - Required. Non-empty array.
+ *                                             Valid values: "fire", "resolved", "ack", "ack_all"
+ * @param {string}   params.start           - Required. ISO8601 datetime with ms precision.
+ * @param {string}   params.end             - Required. ISO8601 datetime with ms precision.
+ *                                             Must be after start.
+ *
+ * @throws {Error} If rule_type is missing or not DEVICE|RULE
+ * @throws {Error} If rule_type is DEVICE and device_ident is missing
+ * @throws {Error} If rule_type is RULE and rule_id is missing
+ * @throws {Error} If rule_states is not a non-empty array
+ * @throws {Error} If rule_states contains invalid values
+ * @throws {Error} If rule_states includes ack or ack_all but rule_id is not provided
+ * @throws {Error} If start or end are missing or not valid ISO8601
+ * @throws {Error} If start >= end
+ * @throws {Error} If device_ident cannot be resolved (Device not found)
+ * @throws {Error} If not connected
+ * @throws {Error} On transport/timeout failure
+ *
+ * @nats_subject api.iot.db.{orgID}.alerts.history
+ * @nats_type request
+ * @encoding JSONCodec
+ *
+ * @request_payload
+ * // rule_type = DEVICE:
+ * { rule_type: "DEVICE", device_id: string, env: string, rule_states: string[], start: string, end: string }
+ *
+ * // rule_type = RULE (with optional device_id):
+ * { rule_type: "RULE", rule_id: string, device_id?: string, env: string, rule_states: string[], start: string, end: string }
+ *
+ * @response_payload
+ * // Success:
+ * { status: "ALERT_FETCH_SUCCESS", data: { "<rule_state>": object[] } }
+ *
+ * @returns {Promise<Object>} Object keyed by rule_state, each containing an array of alert events.
+ *          Returns raw response if status is not ALERT_FETCH_SUCCESS.
+ *
+ * @example
+ * // Query by device
+ * var history = await app.alert.history({
+ *     rule_type: 'DEVICE',
+ *     device_ident: 's-3',
+ *     rule_states: ['fire', 'resolved'],
+ *     start: '2026-03-01T00:00:00.000Z',
+ *     end: '2026-03-25T00:00:00.000Z',
+ * })
+ * // { "fire": [...], "resolved": [...] }
+ *
+ * @example
+ * // Query by rule
+ * var history = await app.alert.history({
+ *     rule_type: 'RULE',
+ *     rule_id: 'rule_abc123',
+ *     rule_states: ['fire', 'ack', 'ack_all'],
+ *     start: '2026-03-01T00:00:00.000Z',
+ *     end: '2026-03-25T00:00:00.000Z',
+ * })
+ *
+ * @example
+ * // Query by rule scoped to a device
+ * var history = await app.alert.history({
+ *     rule_type: 'RULE',
+ *     rule_id: 'rule_abc123',
+ *     device_ident: 's-3',
+ *     rule_states: ['fire'],
+ *     start: '2026-03-01T00:00:00.000Z',
+ *     end: '2026-03-25T00:00:00.000Z',
+ * })
+ */
+
+// ─────────────────────────────────────────────────────────────
 // app.alert.ack({ device_id, alert_id, acked_by, ack_notes? })
 // ─────────────────────────────────────────────────────────────
 
@@ -704,7 +789,9 @@
  *         recovery_duration: number,
  *         cooldown: number
  *     },
- *     notification_channel: string[]
+ *     notification_channel: string[],
+ *     type: "EPHEMERAL",
+ *     env: string
  * }
  *
  * @response_payload
@@ -763,6 +850,17 @@
  * @nats_type request
  * @encoding JSONCodec
  *
+ * @request_payload
+ * {
+ *     id: string,
+ *     name: string | undefined,
+ *     description: string | undefined,
+ *     config: object | undefined,
+ *     notification_channel: string[] | undefined,
+ *     type: "EPHEMERAL",
+ *     env: string
+ * }
+ *
  * @returns {Promise<EphemeralAlertObject|null>} Wrapped alert or null on failure
  */
 
@@ -776,9 +874,20 @@
  * It supports multiple data sources (TELEMETRY, COMMAND, EVENT) and
  * operates in one of two modes depending on whether an evaluator is set.
  *
+ * ─── FILE STRUCTURE ───
+ *
+ * src/ephemeral_alerting/
+ *   index.js   — EphemeralEngine orchestrator (thin facade, delegates to owner or listener)
+ *   owner.js   — EphemeralOwner class (data subscription, state machine, evaluator, RPCs, KV lock)
+ *   listener.js — EphemeralListener class (subscribes to alert events, routes to callbacks)
+ *   shared.js  — Constants (SUBJECT_MAP, indices), helpers (buildDataSubject, resolveIdentFromId,
+ *                buildAlertPayload(rule, rollingState, timestamp, deviceId),
+ *                isMuted, createFreshState, dispatchNotifications(ctx, rule, data), publishEvent)
+ *
  * ─── TWO MODES ───
  *
  * MODE 1: OWNER (evaluator set via .setEvaluator() before .listen())
+ * - Implemented in EphemeralOwner (src/ephemeral_alerting/owner.js)
  * - Acquires NATS KV lock for single-owner enforcement
  * - Subscribes to data topic (JetStream consumer)
  * - Maintains rolling state object, passes to evaluator on each message
@@ -786,6 +895,7 @@
  * - Subscribes to 4 RPC subjects via natsClient.subscribe() for remote ack/ackAll/mute/unmute
  *
  * MODE 2: LISTENER (no evaluator set)
+ * - Implemented in EphemeralListener (src/ephemeral_alerting/listener.js)
  * - Subscribes to import.{orgID}.{env}.alerts.listen.{rule_id}.* (JetStream)
  * - Routes events to callbacks by last token (same as non-ephemeral listen)
  * - For ack/ackAll: sends NATS request (RPC) to owner via custom RPC subjects
@@ -849,7 +959,7 @@
  * 1. Decode JSON payload from msg.data
  * 2. Update local state
  * 3. Call local callback (onAck/onAckAll)
- * 4. Publish event to import.{orgID}.{env}.alerts.listen.{rule_id}.{event}
+ * 4. Publish event to {orgID}.{env}.alerts.listen.{rule_id}.{event}
  * 5. For mute: also sync to backend via api.iot.alerts.{orgID}.mute
  * 6. Reply via msg.respond() with { status: "ACK_SUCCESS"|"MUTE_SUCCESS" } or { status: "ACK_FAILED", reason }
  *
@@ -863,7 +973,15 @@
  * On FIRE or RESOLVED, if rule.notification_channel has entries:
  * Send NATS request to: api.iot.notification.{orgID}.dispatch
  * Encoding: JSONCodec
- * Payload: notification_channel (string[])
+ * Payload: {
+ *     notification_channel: string[],   // from rule.notification_channel
+ *     alert_data: {
+ *         alert: { id, name, config },  // from the rule
+ *         device_id: string,            // extracted from NATS subject (empty string "" on resolved)
+ *         last_value: object,           // current rolling state
+ *         timestamp: number             // Date.now()
+ *     }
+ * }
  *
  * ─── STATE MACHINE ───
  *
@@ -883,12 +1001,22 @@
  *
  * ─── EVALUATION FLOW (per incoming data message) ───
  *
+ * On each incoming message, the data consumer callback:
+ * 1. Decodes msgpack, acks message
+ * 2. Calls #updateRollingState(msg.subject, data)
+ * 3. Calls #evaluate(msg.subject, data) — subject is passed to extract deviceId
+ *
+ * #evaluate(subject, data):
+ * 0. EXTRACT DEVICE ID: Parse subject tokens, extract deviceId at SUBJECT_DEVICE_INDEX[source]
+ *    This deviceId is included in fire/resolved payloads and notification dispatches.
+ *
  * 1. CHECK MUTE:
  *    - FOREVER → skip evaluation
  *    - TIME_BASED and mute_till > now → skip
  *    - Otherwise → proceed
  *
- * 2. UPDATE ROLLING STATE: Extract device ident (reverse-map from ID) and
+ * 2. UPDATE ROLLING STATE: (already done before #evaluate is called)
+ *    Extract device ident (reverse-map from ID) and
  *    last token from NATS subject. Update rollingState[ident][token] = decoded data.
  *
  * 3. RUN EVALUATOR: evaluator(rollingState) → boolean
@@ -916,26 +1044,30 @@
  * 6. UPDATE last_evaluated_at
  *
  * ─── On FIRE ───
- * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.fire (msgpack)
- * 2. Dispatch notifications via api.iot.notification.{orgID}.dispatch
- * 3. Update state: status=alerting, last_fired=now
- * 4. Invoke onFire callback
+ * 1. Update state: status=alerting, last_fired=now
+ * 2. Publish to {orgID}.{env}.alerts.listen.{rule_id}.fire (msgpack)
+ *    Payload: buildAlertPayload(rule, rollingState, timestamp, deviceId)
+ *    → { alert: {id, name, type, config}, device_id, rolling_state, timestamp }
+ * 3. Dispatch notifications with alert_data: { alert, device_id, last_value: rollingState, timestamp }
+ * 4. Invoke onFire callback with buildAlertPayload(rule, rollingState, now, deviceId)
  *
  * ─── On RESOLVED ───
- * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.resolved (msgpack)
- * 2. Dispatch notifications
- * 3. Update state: status=normal, clear acked_by/acked_at/ack_notes/breached_since
- * 4. Invoke onResolved callback
+ * 1. Publish to {orgID}.{env}.alerts.listen.{rule_id}.resolved (msgpack)
+ *    Payload: buildAlertPayload(rule, rollingState, timestamp, deviceId)
+ * 2. Dispatch notifications with alert_data: { alert, device_id: "", last_value: rollingState, timestamp }
+ *    Note: device_id is empty string on resolved since it's not tied to a specific triggering device
+ * 3. Invoke onResolved callback with buildAlertPayload(rule, rollingState, now, deviceId)
+ * 4. Update state: status=normal, clear acked_by/acked_at/ack_notes/breached_since/clear_since
  *
  * ─── On ACK (via RPC from listener, or local call) ───
  * 1. Update state: status=acknowledged, set acked_by/acked_at
- * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack (msgpack)
+ * 2. Publish to {orgID}.{env}.alerts.listen.{rule_id}.ack (msgpack)
  * 3. Invoke onAck callback
  * 4. Reply to RPC with success (if from RPC)
  *
  * ─── On ACK_ALL (same flow) ───
  * 1. Update state: status=acknowledged
- * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack_all (msgpack)
+ * 2. Publish to {orgID}.{env}.alerts.listen.{rule_id}.ack_all (msgpack)
  * 3. Invoke onAckAll callback
  * 4. Reply to RPC with success
  *

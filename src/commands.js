@@ -2,7 +2,9 @@ import { JSONCodec } from 'nats.ws';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { validateIdent, validateNonEmptyArray, validateConnected, validateISO8601, validateObject } from './validation.js';
 
+
 export class CommandManager {
+
     #ctx;
     #codec = JSONCodec();
 
@@ -13,6 +15,7 @@ export class CommandManager {
     async send(params) {
         validateIdent(params.name, 'name');
         validateNonEmptyArray(params.device_ident, 'device_ident');
+
         if (params.data == null) {
             throw new Error('data is required');
         }
@@ -24,8 +27,10 @@ export class CommandManager {
 
         // Resolve each ident individually to track found/unfound
         const result = {};
+
         for (const ident of params.device_ident) {
             let deviceId;
+
             try {
                 deviceId = await this.#ctx.device.resolveDeviceId(ident);
             } catch {
@@ -34,12 +39,14 @@ export class CommandManager {
             }
 
             const subject = `${this.#ctx.orgID}.${this.#ctx.env}.command.queue.${deviceId}.${params.name}`;
+
             const payload = msgpackEncode({
                 value: params.data,
                 timestamp: Date.now(),
             });
 
             const ack = await this.#ctx.publishOrBuffer(subject, payload);
+
             result[ident] = ack != null
                 ? { sent: true }
                 : { sent: false, buffered: true };
@@ -59,6 +66,7 @@ export class CommandManager {
         }
 
         const end = params.end || new Date().toISOString();
+
         if (params.end) {
             validateISO8601(params.end, 'end');
         }
@@ -102,6 +110,7 @@ export class CommandManager {
 
         // Remap device_id keys back to idents
         const result = {};
+
         if (decoded.data && typeof decoded.data === 'object') {
             for (const [deviceId, records] of Object.entries(decoded.data)) {
                 const ident = idToIdent[deviceId] || deviceId;

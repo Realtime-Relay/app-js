@@ -10,23 +10,29 @@ import { HeirarchyGroupManager } from './heirarchyGroup.js';
 import { NotificationManager } from './notifications.js';
 import { decode } from 'nats-jwt';
 
+
 export class RelayApp {
+
     constructor(config) {
         if (config == null || typeof config !== 'object') {
             throw new Error('config must be an object');
         }
+
         if (!config.api_key) {
             throw new Error('api_key is required');
         }
+
         if (!config.secret) {
             throw new Error('secret is required');
         }
+
         if (config.mode !== 'production' && config.mode !== 'test') {
             throw new Error('mode must be "production" or "test"');
         }
 
         // Decode orgID from api_key using nats-jwt decode()
         let orgID;
+
         try {
             const decoded = decode(config.api_key);
             orgID = decoded.nats.org_data.org_id;
@@ -63,6 +69,7 @@ export class RelayApp {
                         return null;
                     }
                 }
+
                 ctx.offlineBuffer.push({ subject, payload });
                 return null;
             },

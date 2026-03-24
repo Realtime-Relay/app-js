@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createMockContext, createMockConsumer, createMockKVBucket } from './setup.js';
 import { DeviceManager } from '../src/device.js';
-import { EphemeralEngine } from '../src/ephemeralEngine.js';
+import { EphemeralEngine } from '../src/ephemeral_alerting/index.js';
+import { buildAlertPayload, dispatchNotifications, createFreshState } from '../src/ephemeral_alerting/shared.js';
 
 const RULE = {
     id: 'rule_eph_1',
@@ -247,7 +248,7 @@ describe('EphemeralEngine', () => {
                 ([, opts]) => opts?.filter_subjects?.includes('alerts.listen')
             );
             expect(alertCall).toBeDefined();
-            expect(alertCall[1].filter_subjects).toBe('import.test_org_123.production.alerts.listen.rule_eph_1.*');
+            expect(alertCall[1].filter_subjects).toBe('test_org_123.production.alerts.listen.rule_eph_1.*');
             await engine.stop();
         });
     });
@@ -329,6 +330,79 @@ describe('EphemeralEngine', () => {
             const engine = new EphemeralEngine(ctx, RULE);
             expect(RULE.notification_channel).toEqual(['notif_1']);
             await engine.stop();
+        });
+    });
+
+    describe('shared: buildAlertPayload', () => {
+        it('includes device_id in payload', () => {
+            const payload = buildAlertPayload(RULE, { sensor_01: { cpu: { value: 90 } } }, 12345, 'dev_1');
+
+            expect(payload.alert.id).toBe('rule_eph_1');
+            expect(payload.alert.name).toBe('custom_check');
+            expect(payload.alert.type).toBe('TELEMETRY');
+            expect(payload.device_id).toBe('dev_1');
+            expect(payload.rolling_state).toEqual({ sensor_01: { cpu: { value: 90 } } });
+            expect(payload.timestamp).toBe(12345);
+        });
+
+        it('device_id is undefined when not provided', () => {
+            const payload = buildAlertPayload(RULE, {}, 12345);
+
+            expect(payload.device_id).toBeUndefined();
+        });
+    });
+
+    describe('shared: dispatchNotifications', () => {
+        it('sends notification_channel and alert_data in payload', async () => {
+            const { ctx } = makeCtx();
+            const alertData = {
+                alert: { id: 'rule_1', name: 'test', config: {} },
+                device_id: 'dev_1',
+                last_value: { sensor_01: { temp: { value: 90 } } },
+                timestamp: Date.now(),
+            };
+
+            await dispatchNotifications(ctx, RULE, alertData);
+
+            expect(ctx.natsClient.request).toHaveBeenCalledTimes(1);
+            const [subject, data] = ctx.natsClient.request.mock.calls[0];
+            expect(subject).toBe('api.iot.notification.test_org_123.dispatch');
+
+            const payload = JSON.parse(new TextDecoder().decode(data));
+            expect(payload.notification_channel).toEqual(['notif_1']);
+            expect(payload.alert_data).toEqual(alertData);
+        });
+
+        it('skips dispatch when no notification channels', async () => {
+            const { ctx } = makeCtx();
+            const ruleNoChannels = { ...RULE, notification_channel: [] };
+
+            await dispatchNotifications(ctx, ruleNoChannels, {});
+
+            expect(ctx.natsClient.request).not.toHaveBeenCalled();
+        });
+
+        it('swallows dispatch errors', async () => {
+            const { ctx } = makeCtx();
+            ctx.natsClient.request.mockRejectedValueOnce(new Error('timeout'));
+
+            // Should not throw
+            await dispatchNotifications(ctx, RULE, {});
+        });
+    });
+
+    describe('shared: createFreshState', () => {
+        it('returns expected initial state', () => {
+            const state = createFreshState();
+
+            expect(state.status).toBe('normal');
+            expect(state.last_evaluated_at).toBeNull();
+            expect(state.clear_since).toBeNull();
+            expect(state.breached_since).toBeNull();
+            expect(state.last_fired).toBe(0);
+            expect(state.acked_by).toBeNull();
+            expect(state.acked_at).toBeNull();
+            expect(state.ack_notes).toBeNull();
         });
     });
 });

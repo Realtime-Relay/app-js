@@ -167,7 +167,7 @@
  * - If disconnected: buffers in ctx.offlineBuffer[], returns null
  * - On reconnect: #flushOfflineBuffer() drains and publishes all buffered messages
  * - On disconnect(): buffer is cleared (unsent messages are discarded)
- * - Applies to: command.send, ephemeralEngine (fire, resolved, ack, ack_all)
+ * - Applies to: command.send, ephemeral alerting engine (fire, resolved, ack, ack_all)
  * - NEVER throws — callers always get either an ack or null (buffered)
  *
  * @returns {void}
