@@ -52,9 +52,8 @@
  *
  * @throws {Error} If name is null/undefined/empty
  * @throws {Error} If name fails validation ([a-zA-Z0-9_-]+)
- * @throws {Error} If type is not one of THRESHOLD, RATE_CHANGE, EPHEMERAL
- * @throws {Error} If type is EPHEMERAL and scope.type is not "DEVICE"
- * @throws {Error} If type is EPHEMERAL and evaluator is not a function
+ * @throws {Error} If type is not one of THRESHOLD, RATE_CHANGE
+ * @throws {Error} If type is EPHEMERAL (must use createEphemeral() instead)
  * @throws {Error} If type is THRESHOLD/RATE_CHANGE and operator/value are missing
  * @throws {Error} If duration or recovery_duration are missing or not positive numbers
  * @throws {Error} If not connected
@@ -300,6 +299,13 @@
  * @method alert.ack
  * @description Acknowledges an alert for a specific device.
  *
+ * @routing
+ * - Non-ephemeral: sends to backend via api.iot.alerts.{orgID}.ack
+ * - Ephemeral + local owner engine: calls engine.ack() directly
+ * - Ephemeral + no local engine: sends NATS request to {orgID}.{env}.alerts.custom.{alert_id}.ack
+ *
+ * Alert type is tracked via internal #alertMetadata Map (populated by create/createEphemeral/get/list).
+ *
  * @param {Object} params
  * @param {string} params.device_id  - Required. Device ID to ack alert for.
  * @param {string} params.alert_id   - Required. Alert rule ID.
@@ -361,6 +367,11 @@
  * @method alert.ackAll
  * @description Acknowledges an alert across all devices for a rule.
  *
+ * @routing (same as ack)
+ * - Non-ephemeral: sends to backend via api.iot.alerts.{orgID}.ack_all
+ * - Ephemeral + local owner engine: calls engine.ackAll() directly
+ * - Ephemeral + no local engine: sends NATS request to {orgID}.{env}.alerts.custom.{alert_id}.ack_all
+ *
  * @param {Object} params
  * @param {string} params.alert_id  - Required. Alert rule ID.
  * @param {string} params.acked_by  - Required. Identifier of who is acknowledging.
@@ -418,6 +429,10 @@
  * @method alert.mute
  * @description Mutes an alert rule. Muted alerts are not evaluated.
  *
+ * @routing
+ * - Non-ephemeral: sends to backend via api.iot.alerts.{orgID}.mute
+ * - Ephemeral: sends NATS request to {orgID}.{env}.alerts.custom.{rule_id}.mute
+ *
  * @param {Object} params
  * @param {string} params.id                    - Required. Alert rule ID.
  * @param {Object} params.mute_config           - Required. Mute configuration.
@@ -469,6 +484,10 @@
  * @description Unmutes an alert rule. Uses the same NATS subject as mute
  *              but with type = "CLEAR".
  *
+ * @routing
+ * - Non-ephemeral: sends to backend via api.iot.alerts.{orgID}.mute (type=CLEAR)
+ * - Ephemeral: sends NATS request to {orgID}.{env}.alerts.custom.{rule_id}.unmute
+ *
  * @param {string} id - Required. Alert rule ID.
  *
  * @throws {Error} If id is null/undefined/empty
@@ -514,6 +533,10 @@
  * @param {Function} [callbacks.onResolved]  - Called when alert resolves.
  * @param {Function} [callbacks.onAck]       - Called when alert is acknowledged.
  * @param {Function} [callbacks.onAckAll]    - Called when all alerts for rule are acknowledged.
+ * @param {Function} [callbacks.onError]     - (Ephemeral owner mode only) Called when the evaluator
+ *                                              function throws. Receives the error object.
+ *                                              The evaluation cycle is skipped and state is unchanged.
+ *                                              Local only — not published over NATS.
  *
  * @throws {Error} If alert object is invalid
  * @throws {Error} If not connected
@@ -611,26 +634,136 @@
  *              an EPHEMERAL alert. Only valid for type = EPHEMERAL.
  *
  * @param {Function} fn - Required. Evaluator function.
- *                         Receives telemetry data object.
+ *                         Receives the rolling state object.
  *                         Must return boolean: true = breach, false = clear.
+ *
+ * Rolling state shape depends on topic source:
+ * TELEMETRY: { "<device_ident>": { "<metric>": { value, timestamp } } }
+ * COMMAND:   { "<device_ident>": { "<command_name>": <command_data> } }
+ * EVENT:     { "<device_ident>": { "<event_name>": <event_data> } }
  *
  * @throws {Error} If fn is not a function
  * @throws {Error} If alert type is not EPHEMERAL
  *
  * @behavior
  * - Stores the evaluator function on the alert object
- * - If .listen() is already active, the new evaluator takes effect immediately
- * - The evaluator is called on each telemetry data point with the decoded data
+ * - If .listen() is already active, the new evaluator takes effect immediately (hot-swap)
+ * - Determines owner mode: calling setEvaluator() before listen() makes this instance the owner
  *
  * @returns {void}
  *
  * @example
- * var alertEphemeral = await app.alert.get("custom_check")
+ * var alert = await app.alert.createEphemeral({ ... })
  *
- * alertEphemeral.setEvaluator((data) => {
- *     // Custom evaluation logic
- *     return data.value > 90 && data.value < 100
+ * alert.setEvaluator((data) => {
+ *     // data is the full rolling state — check any device/metric
+ *     const cpu = data['sensor_01']?.cpu_usage?.value
+ *     return cpu != null && cpu > 90
  * })
+ */
+
+// ─────────────────────────────────────────────────────────────
+// app.alert.createEphemeral(params)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * @method alert.createEphemeral
+ * @description Creates an ephemeral alert rule. The evaluator runs client-side.
+ *              Stored in the backend (visible via list/get).
+ *
+ * @param {Object} params
+ * @param {string}   params.name                       - Required. Unique alert name. [a-zA-Z0-9_-]+
+ * @param {string}   [params.description]              - Optional. Alert description.
+ * @param {Object}   params.config                     - Required. Alert configuration.
+ * @param {Object}   params.config.topic               - Required. Data source definition.
+ * @param {string}   params.config.topic.source        - Required. "TELEMETRY" | "COMMAND" | "EVENT"
+ * @param {string}   params.config.topic.device_ident  - Required. Device ident or "*".
+ *                                                       If not "*", resolved to device_id before subject construction.
+ * @param {string}   params.config.topic.last_token    - Required. Metric/command/event name or "*".
+ * @param {number}   params.config.duration            - Required. Seconds breach must hold before FIRE.
+ * @param {number}   params.config.recovery_duration   - Required. Seconds clear must hold before RESOLVED.
+ * @param {number}   [params.config.cooldown]          - Optional. Seconds between re-fires. Defaults to 0.
+ * @param {string[]} [params.notification_channel]     - Optional. Array of notification IDs. Defaults to [].
+ *
+ * @throws {Error} If name is null/undefined/empty or fails validation
+ * @throws {Error} If config.topic.source is not TELEMETRY, COMMAND, or EVENT
+ * @throws {Error} If config.duration or config.recovery_duration are missing/not positive
+ * @throws {Error} If not connected
+ *
+ * @nats_subject api.iot.alerts.{orgID}.create_ephemeral
+ * @nats_type request
+ * @encoding JSONCodec
+ *
+ * @request_payload
+ * {
+ *     name: string,
+ *     description: string | undefined,
+ *     config: {
+ *         topic: { source: string, device_ident: string, last_token: string },
+ *         duration: number,
+ *         recovery_duration: number,
+ *         cooldown: number
+ *     },
+ *     notification_channel: string[]
+ * }
+ *
+ * @response_payload
+ * // Success:
+ * { status: "EPHEMERAL_CREATE_SUCCESS", data: object }
+ * // Failure:
+ * { status: "EPHEMERAL_CREATE_FAILURE", data: { msg: string[] } }
+ *
+ * @returns {Promise<EphemeralAlertObject|null>} Wrapped alert with:
+ *   - .listen({ onFire, onResolved, onAck, onAckAll }) — starts engine
+ *   - .setEvaluator(fn) — sets client-side evaluator
+ *   - .stop() — stops engine, resets state
+ *   - All data fields from backend response
+ *
+ * @example
+ * var alert = await app.alert.createEphemeral({
+ *     name: 'high_cpu_custom',
+ *     config: {
+ *         topic: { source: 'TELEMETRY', device_ident: 's-3', last_token: 'cpu_usage' },
+ *         duration: 30,
+ *         recovery_duration: 15,
+ *         cooldown: 60,
+ *     },
+ *     notification_channel: ['notif_1'],
+ * })
+ *
+ * alert.setEvaluator((data) => {
+ *     return data['s-3']?.cpu_usage?.value > 90
+ * })
+ *
+ * await alert.listen({
+ *     onFire: (d) => console.log('FIRE', d),
+ *     onResolved: (d) => console.log('RESOLVED', d),
+ * })
+ */
+
+// ─────────────────────────────────────────────────────────────
+// app.alert.updateEphemeral(params)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * @method alert.updateEphemeral
+ * @description Updates an existing ephemeral alert rule.
+ *
+ * @param {Object} params
+ * @param {string}   params.id                         - Required. Alert rule ID.
+ * @param {string}   [params.name]                     - Optional. New name.
+ * @param {string}   [params.description]              - Optional. New description.
+ * @param {Object}   [params.config]                   - Optional. Partial config update.
+ * @param {string[]} [params.notification_channel]     - Optional. New notification channels.
+ *
+ * @throws {Error} If id is null/undefined/empty
+ * @throws {Error} If not connected
+ *
+ * @nats_subject api.iot.alerts.{orgID}.update_ephemeral
+ * @nats_type request
+ * @encoding JSONCodec
+ *
+ * @returns {Promise<EphemeralAlertObject|null>} Wrapped alert or null on failure
  */
 
 // ═════════════════════════════════════════════════════════════
@@ -640,200 +773,190 @@
 /**
  * @description
  * The ephemeral alert engine runs entirely client-side in the SDK.
- * It mirrors the backend alerting engine (threshold_eval.js) but uses
- * a user-provided evaluator function instead of operator-based comparison.
+ * It supports multiple data sources (TELEMETRY, COMMAND, EVENT) and
+ * operates in one of two modes depending on whether an evaluator is set.
  *
- * The engine is activated when .listen() is called on an EPHEMERAL alert
- * that has an evaluator set (via create config or .setEvaluator()).
+ * ─── TWO MODES ───
+ *
+ * MODE 1: OWNER (evaluator set via .setEvaluator() before .listen())
+ * - Acquires NATS KV lock for single-owner enforcement
+ * - Subscribes to data topic (JetStream consumer)
+ * - Maintains rolling state object, passes to evaluator on each message
+ * - State machine fires/resolves locally → calls callbacks AND publishes events
+ * - Subscribes to 4 RPC subjects via natsClient.subscribe() for remote ack/ackAll/mute/unmute
+ *
+ * MODE 2: LISTENER (no evaluator set)
+ * - Subscribes to import.{orgID}.{env}.alerts.listen.{rule_id}.* (JetStream)
+ * - Routes events to callbacks by last token (same as non-ephemeral listen)
+ * - For ack/ackAll: sends NATS request (RPC) to owner via custom RPC subjects
+ *
+ * ─── DATA TOPIC CONSTRUCTION ───
+ *
+ * Built from rule.config.topic:
+ * | Source    | Subject                                                      |
+ * |-----------|--------------------------------------------------------------|
+ * | TELEMETRY | {orgID}.{env}.telemetry.{device_id|*}.{last_token}          |
+ * | COMMAND   | {orgID}.{env}.command.queue.{device_id|*}.{last_token}      |
+ * | EVENT     | {orgID}.{env}.events.{device_id|*}.{last_token}             |
+ *
+ * If device_ident !== "*": resolved to device_id via ctx.device.resolveDeviceId()
+ *
+ * ─── ROLLING STATE ───
+ *
+ * The engine accumulates latest values per device per metric/command/event.
+ * Keys are device idents (reverse-mapped from device IDs via cache).
+ *
+ * TELEMETRY: { "sensor_01": { "temperature": { value, timestamp }, "humidity": { value, timestamp } } }
+ * COMMAND:   { "sensor_01": { "reboot": <command_data> } }
+ * EVENT:     { "sensor_01": { "door_opened": <event_data> } }
+ *
+ * On each message: update rolling state → pass full state to evaluator(rollingState) → boolean
+ *
+ * ─── NATS KV LOCK (Owner Mode Only) ───
+ *
+ * Package: @nats-io/kv
+ * Bucket: {orgID} (existing shared org bucket, opened via new Kvm(jetstream).open(orgID) in ConnectionManager.connect())
+ * Key: ephemeral_owner_{rule_id}
+ * Value: { started_at, expires_at } (JSON)
+ *
+ * TTL is stored as `expires_at` in the value (bucket is shared, no bucket-level TTL).
+ * expires_at = Date.now() + 30000 (30 seconds from creation/refresh).
+ *
+ * Heartbeat: owner re-puts key every 15 seconds, refreshing expires_at.
+ *
+ * On .listen() with evaluator:
+ * 1. Check if key exists via kv.get()
+ * 2. If exists AND expires_at > now → throw "Evaluator already active for this rule"
+ * 3. If exists AND expires_at <= now → delete stale key, proceed
+ * 4. If not exists → proceed
+ * 5. Acquire via kv.create() (put-if-absent) with { client_id, started_at, expires_at }
+ * 6. Start heartbeat interval (15s)
+ *
+ * On .stop():
+ * - Delete key from KV
+ * - Clear heartbeat interval
+ *
+ * ─── RPC SUBSCRIPTION (Owner Mode — natsClient.subscribe) ───
+ *
+ * Single wildcard subscription: {orgID}.{env}.alerts.custom.{rule_id}.*
+ *
+ * Routes by last token:
+ * - "ack"      → handle ack
+ * - "ack_all"  → handle ack_all
+ * - "mute"     → handle mute/unmute (mute_config.type = "CLEAR" for unmute)
+ *
+ * Each RPC handler:
+ * 1. Decode JSON payload from msg.data
+ * 2. Update local state
+ * 3. Call local callback (onAck/onAckAll)
+ * 4. Publish event to import.{orgID}.{env}.alerts.listen.{rule_id}.{event}
+ * 5. For mute: also sync to backend via api.iot.alerts.{orgID}.mute
+ * 6. Reply via msg.respond() with { status: "ACK_SUCCESS"|"MUTE_SUCCESS" } or { status: "ACK_FAILED", reason }
  *
  * ─── OFFLINE BUFFER ───
  *
- * All JetStream publishes (fire, resolved, ack, ack_all) go through
- * ctx.publishOrBuffer(). If the client is disconnected, messages are
- * queued in ctx.offlineBuffer[] and flushed automatically on reconnect.
+ * All JetStream publishes (fire, resolved) go through ctx.publishOrBuffer().
+ * If disconnected, messages are queued and flushed on reconnect.
  *
- * ─── TELEMETRY SUBSCRIPTION ───
+ * ─── NOTIFICATION DISPATCH ───
  *
- * On .listen() for EPHEMERAL:
- * 1. Subscribe to telemetry: {orgID}.{env}.telemetry.<device_ident>.<metric>
- *    - device_ident resolved from rule's config.scope.value (device_id → ident via cache)
- *    - metric from rule.metric
- *    - Encoding: msgpack decode
- *
- * 2. Subscribe to JetStream alert topics (4 consumers) for remote events:
- *    - import.{orgID}.{env}.alerts.listen.<rule_id>.fire
- *    - import.{orgID}.{env}.alerts.listen.<rule_id>.resolved
- *    - import.{orgID}.{env}.alerts.listen.<rule_id>.ack
- *    - import.{orgID}.{env}.alerts.listen.<rule_id>.ack_all
- *    These handle ack/ack_all from OTHER SDK instances across the network.
+ * On FIRE or RESOLVED, if rule.notification_channel has entries:
+ * Send NATS request to: api.iot.notification.{orgID}.dispatch
+ * Encoding: JSONCodec
+ * Payload: notification_channel (string[])
  *
  * ─── STATE MACHINE ───
  *
  * States: "normal" | "alerting" | "acknowledged"
  *
- * State object (persisted to NATS KV):
+ * State object:
  * {
- *     status: "normal",              // Current state
- *     last_evaluated_at: null,       // Unix ms timestamp of last evaluation
- *     clear_since: null,             // Unix ms timestamp when clear started
- *     breached_since: null,          // Unix ms timestamp when breach started
- *     last_fired: 0,                 // Unix ms timestamp of last fire notification
- *     acked_by: null,                // Who acknowledged
- *     acked_at: null,                // When acknowledged (unix ms)
- *     ack_notes: null                // Notes from acknowledgment
+ *     status: "normal",
+ *     last_evaluated_at: null,
+ *     clear_since: null,
+ *     breached_since: null,
+ *     last_fired: 0,
+ *     acked_by: null,
+ *     acked_at: null,
+ *     ack_notes: null
  * }
  *
- * KV Key: {ruleID}_{deviceID}
- * KV Bucket: TBD (pending backend endpoint — see Backend Tasks)
+ * ─── EVALUATION FLOW (per incoming data message) ───
  *
- * ─── EVALUATION FLOW (per telemetry data point) ───
- *
- * 1. CHECK MUTE: Query rule's alert_mute_config (cached from backend).
- *    - If type = "FOREVER" → skip evaluation
- *    - If type = "TIME_BASED" and mute_till > now → skip evaluation
+ * 1. CHECK MUTE:
+ *    - FOREVER → skip evaluation
+ *    - TIME_BASED and mute_till > now → skip
  *    - Otherwise → proceed
  *
- * 2. RUN EVALUATOR: Call user's evaluator(data) → returns boolean
- *    - true = metric is in breach
- *    - false = metric is clear
+ * 2. UPDATE ROLLING STATE: Extract device ident (reverse-map from ID) and
+ *    last token from NATS subject. Update rollingState[ident][token] = decoded data.
  *
- * 3. CHECK STALENESS: If gap between current timestamp and last_evaluated_at
- *    is greater than (duration * 1000) ms → reset breached_since and clear_since to null.
- *    This prevents stale state from triggering old alerts.
+ * 3. RUN EVALUATOR: evaluator(rollingState) → boolean
+ *    - true = breach
+ *    - false = clear
  *
- * 4. APPLY STATE TRANSITIONS:
+ * 4. CHECK STALENESS: If gap > duration*1000ms → reset breached_since, clear_since
  *
- *    IF BREACHED (evaluator returned true):
+ * 5. STATE TRANSITIONS: (same as before)
  *
- *    a. If breached_since is null → set breached_since = now, clear clear_since
- *    b. heldFor = now - breached_since
- *    c. If heldFor < duration (seconds * 1000 ms) → no action (still counting)
- *    d. If status == "normal" AND heldFor >= duration:
- *       → Transition to "alerting"
- *       → FIRE (see On FIRE below)
- *    e. If status == "alerting" AND (now - last_fired) >= cooldown (seconds * 1000 ms):
- *       → Re-FIRE (cooldown cycle notification)
- *    f. If status == "acknowledged":
- *       → Do nothing (silent, no re-fires while acknowledged)
+ *    BREACHED:
+ *    a. Set breached_since if null, clear clear_since
+ *    b. If heldFor < duration → no action
+ *    c. If normal AND heldFor >= duration → FIRE, transition to alerting
+ *    d. If alerting AND cooldown elapsed → Re-FIRE
+ *    e. If acknowledged → silent
  *
- *    IF CLEAR (evaluator returned false):
+ *    CLEAR:
+ *    a. Set clear_since if null, clear breached_since
+ *    b. If clearedFor < recovery_duration → no action
+ *    c. If alerting|acknowledged AND clearedFor >= recovery_duration → RESOLVED, transition to normal
  *
- *    a. If clear_since is null → set clear_since = now, clear breached_since
- *    b. clearedFor = now - clear_since
- *    c. If clearedFor < recovery_duration (seconds * 1000 ms) → no action
- *    d. If status == "alerting" OR status == "acknowledged"
- *       AND clearedFor >= recovery_duration:
- *       → RESOLVE (see On RESOLVED below)
- *       → Transition to "normal"
- *       → Clear: acked_by, acked_at, ack_notes, breached_since
- *
- * 5. UPDATE: Set last_evaluated_at = now. Persist state to NATS KV.
+ * 6. UPDATE last_evaluated_at
  *
  * ─── On FIRE ───
- *
- * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.fire
- *    Encoding: msgpack
- *    Payload:
- *    {
- *        rule: {
- *            name: <rule.name>,
- *            type: "DEVICE",
- *            type_value: <device_id>
- *        },
- *        device_id: <device_id>,
- *        last_value: {
- *            value: <current_value>,
- *            field_name: <rule.metric>
- *        },
- *        timestamp: Date.now()
- *    }
- *
- * 2. Dispatch notifications (if notification_channel has entries):
- *    For each notif_id in rule.notification_channel:
- *    Publish to: notif_dispatcher.notification.send
- *    Encoding: JSONCodec
- *    Payload:
- *    {
- *        notif_id: <notif_id>,
- *        org_id: <orgID>,
- *        alert_data: {
- *            rule: { name, type: "DEVICE", type_value: <device_id> },
- *            device_id: <device_id>,
- *            last_value: { value: <current_value>, field_name: <rule.metric> },
- *            timestamp: Date.now()
- *        }
- *    }
- *
- * 3. Update state: status = "alerting", last_fired = Date.now()
- *
- * 4. Invoke local onFire callback if registered
- *
- * 5. Persist state to NATS KV
+ * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.fire (msgpack)
+ * 2. Dispatch notifications via api.iot.notification.{orgID}.dispatch
+ * 3. Update state: status=alerting, last_fired=now
+ * 4. Invoke onFire callback
  *
  * ─── On RESOLVED ───
+ * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.resolved (msgpack)
+ * 2. Dispatch notifications
+ * 3. Update state: status=normal, clear acked_by/acked_at/ack_notes/breached_since
+ * 4. Invoke onResolved callback
  *
- * 1. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.resolved
- *    Encoding: msgpack
- *    Payload: same structure as FIRE payload
+ * ─── On ACK (via RPC from listener, or local call) ───
+ * 1. Update state: status=acknowledged, set acked_by/acked_at
+ * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack (msgpack)
+ * 3. Invoke onAck callback
+ * 4. Reply to RPC with success (if from RPC)
  *
- * 2. Dispatch notifications (same flow as FIRE)
+ * ─── On ACK_ALL (same flow) ───
+ * 1. Update state: status=acknowledged
+ * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack_all (msgpack)
+ * 3. Invoke onAckAll callback
+ * 4. Reply to RPC with success
  *
- * 3. Update state: status = "normal", clear acked_by/acked_at/ack_notes/breached_since
- *
- * 4. Invoke local onResolved callback if registered
- *
- * 5. Persist state to NATS KV
- *
- * ─── On ACK (from local SDK call — app.alert.ack) ───
- *
- * For ephemeral alerts, when ack is called locally:
- * 1. Update local state: status = "acknowledged", set acked_by, acked_at = Date.now()
- * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack
- *    Encoding: msgpack
- *    Payload:
- *    {
- *        status: "acknowledged",
- *        device_ident: <device_ident>,
- *        ack: { acked_by, ack_notes: null, acked_at: Date.now() }
- *    }
- * 3. Invoke local onAck callback if registered
- * 4. Persist state to NATS KV
- *
- * ─── On ACK (from remote — received via JetStream subscription) ───
- *
- * When an ack event arrives from another SDK instance:
- * 1. Update local state: status = "acknowledged", set acked_by, acked_at from payload
- * 2. Invoke local onAck callback if registered
- * 3. Persist state to NATS KV
- *
- * ─── On ACK_ALL (local or remote — same flow) ───
- *
- * 1. Update local state for the device: status = "acknowledged"
- * 2. Publish to import.{orgID}.{env}.alerts.listen.{rule_id}.ack_all (if local)
- *    Payload: { status: "acknowledged", ack: { acked_by, ack_notes, acked_at } }
- * 3. Invoke local onAckAll callback if registered
- * 4. Persist state to NATS KV
- *
- * ─── STATE PERSISTENCE ───
- *
- * - On connect: load state from NATS KV if exists, otherwise create fresh state
- * - On every state change: persist to NATS KV
- * - KV key: {ruleID}_{deviceID}
- * - KV bucket/endpoint: TBD — pending backend creation
- *   (skeleton code should prepare for KV get/put operations)
+ * ─── stop() ───
+ * 1. Delete data consumer
+ * 2. Unsubscribe RPC subscriptions (drain)
+ * 3. Delete alert consumers (listener mode)
+ * 4. Release KV lock + clear heartbeat
+ * 5. Reset rolling state to {}
+ * 6. Reset state machine to normal
  *
  * ─── STATE TRANSITION TABLE ───
  *
- * | Current       | Condition                     | Duration Met?  | Next State     | Action                     |
- * |---------------|-------------------------------|----------------|----------------|----------------------------|
- * | normal        | breach, held < duration        | No             | normal         | Track breached_since       |
- * | normal        | breach, held >= duration       | Yes            | alerting       | FIRE                       |
- * | alerting      | breach, cooldown elapsed       | -              | alerting       | Re-FIRE                    |
- * | alerting      | breach, cooldown not elapsed   | -              | alerting       | No action (silent)         |
- * | alerting      | acked                          | -              | acknowledged   | Silent                     |
- * | alerting      | clear, held < recovery         | -              | alerting       | Track clear_since          |
- * | alerting      | clear, held >= recovery        | -              | normal         | RESOLVED                   |
- * | acknowledged  | breach                         | -              | acknowledged   | No action (silent)         |
- * | acknowledged  | clear, held < recovery         | -              | acknowledged   | Track clear_since          |
- * | acknowledged  | clear, held >= recovery        | -              | normal         | RESOLVED                   |
+ * | Current       | Condition                     | Duration Met?  | Next State     | Action               |
+ * |---------------|-------------------------------|----------------|----------------|----------------------|
+ * | normal        | breach, held < duration        | No             | normal         | Track breached_since |
+ * | normal        | breach, held >= duration       | Yes            | alerting       | FIRE                 |
+ * | alerting      | breach, cooldown elapsed       | -              | alerting       | Re-FIRE              |
+ * | alerting      | breach, cooldown not elapsed   | -              | alerting       | Silent               |
+ * | alerting      | acked                          | -              | acknowledged   | Silent               |
+ * | alerting      | clear, held < recovery         | -              | alerting       | Track clear_since    |
+ * | alerting      | clear, held >= recovery        | -              | normal         | RESOLVED             |
+ * | acknowledged  | breach                         | -              | acknowledged   | Silent               |
+ * | acknowledged  | clear, held < recovery         | -              | acknowledged   | Track clear_since    |
+ * | acknowledged  | clear, held >= recovery        | -              | normal         | RESOLVED             |
  */

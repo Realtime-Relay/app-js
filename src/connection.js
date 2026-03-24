@@ -1,5 +1,6 @@
 import { connect, JSONCodec, Events, DebugEvents, credsAuthenticator } from 'nats.ws';
 import { jetstream } from '@nats-io/jetstream';
+import { Kvm } from '@nats-io/kv';
 import { decode as msgpackDecode } from '@msgpack/msgpack';
 import { buildCredentials } from './utils.js';
 import { validateFunction } from './validation.js';
@@ -57,6 +58,16 @@ export class ConnectionManager {
             });
 
             this.#ctx.jetstream = await jetstream(this.#ctx.natsClient);
+
+            // Initialize KV bucket for ephemeral alert locks
+            try {
+                const kvm = new Kvm(this.#ctx.jetstream);
+                this.#ctx.kvBucket = await kvm.open(this.#ctx.orgID);
+            } catch {
+                // KV not available — ephemeral locking will be skipped
+                this.#ctx.kvBucket = null;
+            }
+
             this.#ctx.connected = true;
             this.#connectCalled = true;
 

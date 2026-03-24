@@ -1,13 +1,16 @@
 import { JSONCodec } from 'nats.ws';
 import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateIdent, validateConnected, validateFunction } from './validation.js';
+import { validateIdent, validateConnected, validateFunction, validatePositiveNumber } from './validation.js';
 import { EphemeralEngine } from './ephemeralEngine.js';
+
+const VALID_SOURCES = ['TELEMETRY', 'COMMAND', 'EVENT'];
 
 export class AlertManager {
     #ctx;
     #codec = JSONCodec();
-    #listenConsumers = new Map(); // ruleId -> consumer[]
-    #ephemeralEngines = new Map(); // ruleId -> EphemeralEngine
+    #listenConsumers = new Map();     // ruleId -> consumer[]
+    #ephemeralEngines = new Map();    // ruleId -> EphemeralEngine
+    #alertMetadata = new Map();       // alertId -> { type, ... }
 
     constructor(ctx) {
         this.#ctx = ctx;
@@ -26,50 +29,73 @@ export class AlertManager {
         return res.json();
     }
 
-    #wrapAlert(data, evaluator = null) {
+    // ─── Wrap non-ephemeral alert ────────────────────────────
+
+    #wrapAlert(data) {
         if (!data) return data;
         const alert = { ...data };
-        let storedEvaluator = evaluator;
+
+        // Track metadata
+        if (data.id) {
+            this.#alertMetadata.set(data.id, { type: data.type || 'THRESHOLD' });
+        }
 
         alert.listen = async (callbacks) => {
-            await this.#listen(data, callbacks, storedEvaluator);
+            await this.#listen(data, callbacks);
         };
 
         alert.setEvaluator = (fn) => {
-            if (data.type !== 'EPHEMERAL') {
-                throw new Error('setEvaluator is only allowed for EPHEMERAL alerts');
-            }
-            validateFunction(fn, 'evaluator');
-            storedEvaluator = fn;
-
-            // Update running engine if exists
-            const engine = this.#ephemeralEngines.get(data.id);
-            if (engine) {
-                engine.setEvaluator(fn);
-            }
+            throw new Error('setEvaluator is only allowed for EPHEMERAL alerts');
         };
 
         return alert;
     }
 
+    // ─── Wrap ephemeral alert ────────────────────────────────
+
+    #wrapEphemeralAlert(data) {
+        if (!data) return data;
+        const alert = { ...data };
+
+        // Track metadata
+        if (data.id) {
+            this.#alertMetadata.set(data.id, { type: 'EPHEMERAL' });
+        }
+
+        const engine = new EphemeralEngine(this.#ctx, data);
+        this.#ephemeralEngines.set(data.id, engine);
+
+        alert.setEvaluator = (fn) => {
+            validateFunction(fn, 'evaluator');
+            engine.setEvaluator(fn);
+        };
+
+        alert.listen = async (callbacks) => {
+            validateConnected(this.#ctx.connected);
+            await engine.listen(callbacks);
+        };
+
+        alert.stop = async () => {
+            await engine.stop();
+        };
+
+        return alert;
+    }
+
+    // ─── CRUD ────────────────────────────────────────────────
+
     async create(config) {
         validateConnected(this.#ctx.connected);
         validateIdent(config.name, 'name');
 
-        if (!['THRESHOLD', 'RATE_CHANGE', 'EPHEMERAL'].includes(config.type)) {
-            throw new Error('type must be THRESHOLD, RATE_CHANGE, or EPHEMERAL');
-        }
-
         if (config.type === 'EPHEMERAL') {
-            if (config.config?.scope?.type !== 'DEVICE') {
-                throw new Error('EPHEMERAL alerts require scope.type = "DEVICE"');
-            }
-            if (config.evaluator && typeof config.evaluator !== 'function') {
-                throw new Error('evaluator must be a function');
-            }
+            throw new Error('Use createEphemeral() for EPHEMERAL alerts');
         }
 
-        // Build request payload (exclude evaluator)
+        if (!['THRESHOLD', 'RATE_CHANGE'].includes(config.type)) {
+            throw new Error('type must be THRESHOLD or RATE_CHANGE');
+        }
+
         const payload = {
             name: config.name,
             description: config.description,
@@ -81,11 +107,33 @@ export class AlertManager {
         };
 
         const res = await this.#request('create', payload);
+        if (res.data) return this.#wrapAlert(res.data);
+        return null;
+    }
 
-        if (res.data) {
-            return this.#wrapAlert(res.data, config.evaluator || null);
+    async createEphemeral(config) {
+        validateConnected(this.#ctx.connected);
+        validateIdent(config.name, 'name');
+
+        if (!config.config) throw new Error('config is required');
+        if (!config.config.topic) throw new Error('config.topic is required');
+        if (!VALID_SOURCES.includes(config.config.topic.source)) {
+            throw new Error('config.topic.source must be TELEMETRY, COMMAND, or EVENT');
         }
+        if (!config.config.topic.device_ident) throw new Error('config.topic.device_ident is required');
+        if (!config.config.topic.last_token) throw new Error('config.topic.last_token is required');
+        validatePositiveNumber(config.config.duration, 'config.duration');
+        validatePositiveNumber(config.config.recovery_duration, 'config.recovery_duration');
 
+        const payload = {
+            name: config.name,
+            description: config.description,
+            config: config.config,
+            notification_channel: config.notification_channel || [],
+        };
+
+        const res = await this.#request('create_ephemeral', payload);
+        if (res.data) return this.#wrapEphemeralAlert(res.data);
         return null;
     }
 
@@ -94,17 +142,30 @@ export class AlertManager {
         if (!config.id) throw new Error('id is required');
 
         const res = await this.#request('update', config);
-
-        if (res.data) {
-            return this.#wrapAlert(res.data);
-        }
-
+        if (res.data) return this.#wrapAlert(res.data);
         return res;
+    }
+
+    async updateEphemeral(config) {
+        validateConnected(this.#ctx.connected);
+        if (!config.id) throw new Error('id is required');
+
+        const res = await this.#request('update_ephemeral', config);
+        if (res.data) return this.#wrapEphemeralAlert(res.data);
+        return null;
     }
 
     async delete(alertId) {
         validateConnected(this.#ctx.connected);
         if (!alertId) throw new Error('id is required');
+
+        // Clean up engine if exists
+        const engine = this.#ephemeralEngines.get(alertId);
+        if (engine) {
+            await engine.stop();
+            this.#ephemeralEngines.delete(alertId);
+        }
+        this.#alertMetadata.delete(alertId);
 
         const res = await this.#request('delete', { id: alertId });
         return res.status === 'ALERT_DELETE_SUCCESS';
@@ -113,7 +174,14 @@ export class AlertManager {
     async list() {
         validateConnected(this.#ctx.connected);
         const res = await this.#request('list', {});
-        return res.data || [];
+        const alerts = res.data || [];
+        // Track metadata for all listed alerts
+        for (const a of alerts) {
+            if (a.id) {
+                this.#alertMetadata.set(a.id, { type: a.type || 'THRESHOLD' });
+            }
+        }
+        return alerts;
     }
 
     async get(alertName) {
@@ -121,13 +189,21 @@ export class AlertManager {
         validateIdent(alertName, 'alertName');
 
         const res = await this.#request('get', { name: alertName });
+        if (!res.data) return null;
 
-        if (res.data) {
-            return this.#wrapAlert(res.data);
+        // Track metadata
+        if (res.data.id) {
+            this.#alertMetadata.set(res.data.id, { type: res.data.type || 'THRESHOLD' });
         }
 
-        return null;
+        // Return correct wrapper based on type
+        if (res.data.type === 'EPHEMERAL') {
+            return this.#wrapEphemeralAlert(res.data);
+        }
+        return this.#wrapAlert(res.data);
     }
+
+    // ─── Ack / AckAll ────────────────────────────────────────
 
     async ack(params) {
         validateConnected(this.#ctx.connected);
@@ -135,12 +211,26 @@ export class AlertManager {
         if (!params.alert_id) throw new Error('alert_id is required');
         if (!params.acked_by) throw new Error('acked_by is required');
 
-        // Check if this is an ephemeral alert with a running engine
+        // Check if ephemeral with local owner engine
         const engine = this.#ephemeralEngines.get(params.alert_id);
-        if (engine) {
+        if (engine && engine.mode === 'owner') {
             return engine.ack(params.acked_by, params.ack_notes);
         }
 
+        // Check if ephemeral without local engine — RPC to owner
+        const meta = this.#alertMetadata.get(params.alert_id);
+        if (meta?.type === 'EPHEMERAL') {
+            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack`;
+            const res = await this.#ctx.natsClient.request(
+                subject,
+                this.#codec.encode(params),
+                { timeout: 10000 }
+            );
+            const data = res.json();
+            return data.status === 'ACK_SUCCESS';
+        }
+
+        // Non-ephemeral — backend
         const res = await this.#request('ack', {
             device_id: params.device_id,
             rule_id: params.alert_id,
@@ -148,7 +238,6 @@ export class AlertManager {
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
         });
-
         return res.status === 'ALERT_ACK_SUCCESS';
     }
 
@@ -158,8 +247,20 @@ export class AlertManager {
         if (!params.acked_by) throw new Error('acked_by is required');
 
         const engine = this.#ephemeralEngines.get(params.alert_id);
-        if (engine) {
+        if (engine && engine.mode === 'owner') {
             return engine.ackAll(params.acked_by, params.ack_notes);
+        }
+
+        const meta = this.#alertMetadata.get(params.alert_id);
+        if (meta?.type === 'EPHEMERAL') {
+            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack_all`;
+            const res = await this.#ctx.natsClient.request(
+                subject,
+                this.#codec.encode(params),
+                { timeout: 10000 }
+            );
+            const data = res.json();
+            return data.status === 'ACK_SUCCESS';
         }
 
         const res = await this.#request('ack_all', {
@@ -168,9 +269,10 @@ export class AlertManager {
             env: this.#ctx.env,
             ack_notes: params.ack_notes,
         });
-
         return res.status === 'ALERT_ACK_SUCCESS';
     }
+
+    // ─── Mute / Unmute ───────────────────────────────────────
 
     async mute(params) {
         validateConnected(this.#ctx.connected);
@@ -179,15 +281,27 @@ export class AlertManager {
         if (!['FOREVER', 'TIME_BASED'].includes(params.mute_config.type)) {
             throw new Error('mute_config.type must be FOREVER or TIME_BASED');
         }
+        if (params.mute_config.type === 'TIME_BASED' && !params.mute_config.mute_till) {
+            throw new Error('mute_till is required for TIME_BASED mute');
+        }
+
+        // Ephemeral — RPC to owner (single 'mute' endpoint handles both mute/unmute)
+        const meta = this.#alertMetadata.get(params.id);
+        if (meta?.type === 'EPHEMERAL') {
+            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.id}.mute`;
+            const res = await this.#ctx.natsClient.request(
+                subject,
+                this.#codec.encode({ mute_config: params.mute_config }),
+                { timeout: 10000 }
+            );
+            return res.json();
+        }
 
         const payload = {
             rule_id: params.id,
             type: params.mute_config.type,
         };
         if (params.mute_config.type === 'TIME_BASED') {
-            if (!params.mute_config.mute_till) {
-                throw new Error('mute_till is required for TIME_BASED mute');
-            }
             payload.mute_till = params.mute_config.mute_till;
         }
 
@@ -198,21 +312,26 @@ export class AlertManager {
         validateConnected(this.#ctx.connected);
         if (!id) throw new Error('id is required');
 
+        // Ephemeral — RPC to owner via same 'mute' endpoint with type=CLEAR
+        const meta = this.#alertMetadata.get(id);
+        if (meta?.type === 'EPHEMERAL') {
+            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${id}.mute`;
+            const res = await this.#ctx.natsClient.request(
+                subject,
+                this.#codec.encode({ mute_config: { type: 'CLEAR' } }),
+                { timeout: 10000 }
+            );
+            return res.json();
+        }
+
         return this.#request('mute', { rule_id: id, type: 'CLEAR' });
     }
 
-    async #listen(rule, callbacks, evaluator) {
+    // ─── Listen (non-ephemeral) ──────────────────────────────
+
+    async #listen(rule, callbacks) {
         validateConnected(this.#ctx.connected);
 
-        if (rule.type === 'EPHEMERAL') {
-            // Start ephemeral engine
-            const engine = new EphemeralEngine(this.#ctx, rule, evaluator);
-            this.#ephemeralEngines.set(rule.id, engine);
-            await engine.start(callbacks);
-            return;
-        }
-
-        // Non-ephemeral: single wildcard consumer for all alert events
         const ruleId = rule.id;
         const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${ruleId}.*`;
 
@@ -241,7 +360,6 @@ export class AlertManager {
                 const data = msgpackDecode(msg.data);
                 msg.ack();
 
-                // Extract last token from subject to determine event type
                 const tokens = msg.subject.split('.');
                 const eventType = tokens[tokens.length - 1];
                 const cb = callbackMap[eventType];
@@ -259,6 +377,8 @@ export class AlertManager {
         }
         return transformed;
     }
+
+    // ─── Cleanup ─────────────────────────────────────────────
 
     async deleteAllConsumers() {
         for (const [, consumers] of this.#listenConsumers) {

@@ -50,16 +50,16 @@ describe('AlertManager', () => {
         it('rejects invalid type', async () => {
             const ctx = makeCtx();
             const am = new AlertManager(ctx);
-            await expect(am.create({ name: 'x', type: 'INVALID', metric: 'temp', config: {} })).rejects.toThrow('THRESHOLD, RATE_CHANGE, or EPHEMERAL');
+            await expect(am.create({ name: 'x', type: 'INVALID', metric: 'temp', config: {} })).rejects.toThrow('THRESHOLD or RATE_CHANGE');
         });
 
-        it('rejects EPHEMERAL with non-DEVICE scope', async () => {
+        it('rejects EPHEMERAL type (must use createEphemeral)', async () => {
             const ctx = makeCtx();
             const am = new AlertManager(ctx);
             await expect(am.create({
                 name: 'x', type: 'EPHEMERAL', metric: 'temp',
-                config: { scope: { type: 'LOGICAL_GROUP', value: 'g1' }, duration: 10, recovery_duration: 5 },
-            })).rejects.toThrow('DEVICE');
+                config: { scope: { type: 'DEVICE', value: 'dev_1' }, duration: 10, recovery_duration: 5 },
+            })).rejects.toThrow('createEphemeral');
         });
     });
 

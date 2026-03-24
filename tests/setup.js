@@ -85,12 +85,109 @@ export function createMockNatsClient(responses = {}) {
             };
         }),
         publish: vi.fn(),
+        subscribe: vi.fn((subject) => {
+            const sub = createMockSubscription();
+            sub._subject = subject;
+            return sub;
+        }),
         status: vi.fn(() => statusIterator),
         closed: vi.fn(() => new Promise(() => {})), // Never resolves
         close: vi.fn(async () => {}),
         info: { client_id: 'test_client_123' },
         _statusIterator: statusIterator,
     };
+}
+
+// ─── KV Mock ────────────────────────────────────────────────
+
+export function createMockKVBucket() {
+    const _store = new Map();
+
+    return {
+        _store,
+        get: vi.fn(async (key) => {
+            if (!_store.has(key)) {
+                const err = new Error(`key not found: ${key}`);
+                err.code = 'KEY_NOT_FOUND';
+                throw err;
+            }
+            const value = _store.get(key);
+            return { value: jc.encode(value), json: () => value, revision: 1 };
+        }),
+        put: vi.fn(async (key, value) => {
+            const decoded = typeof value === 'string' ? JSON.parse(value) : value;
+            _store.set(key, decoded);
+            return 1; // revision
+        }),
+        create: vi.fn(async (key, value) => {
+            if (_store.has(key)) {
+                const err = new Error(`key already exists: ${key}`);
+                err.code = 'KEY_EXISTS';
+                throw err;
+            }
+            const decoded = typeof value === 'string' ? JSON.parse(value) : value;
+            _store.set(key, decoded);
+            return 1;
+        }),
+        delete: vi.fn(async (key) => {
+            _store.delete(key);
+        }),
+        purge: vi.fn(async (key) => {
+            _store.delete(key);
+        }),
+    };
+}
+
+export function createMockKV(bucket) {
+    const kvBucket = bucket || createMockKVBucket();
+    return {
+        status: vi.fn(async () => ({ bucket: 'test_bucket' })),
+        _bucket: kvBucket,
+        // The Kvm.get() returns the KV store
+    };
+}
+
+// ─── Subscribe Mock ─────────────────────────────────────────
+
+export function createMockSubscription() {
+    let callback = null;
+    const messages = [];
+    let draining = false;
+
+    const sub = {
+        [Symbol.asyncIterator]() {
+            let idx = 0;
+            return {
+                async next() {
+                    if (draining || idx >= messages.length) {
+                        return { done: true, value: undefined };
+                    }
+                    return { done: false, value: messages[idx++] };
+                },
+            };
+        },
+        callback: vi.fn((cb) => { callback = cb; }),
+        drain: vi.fn(async () => { draining = true; }),
+        unsubscribe: vi.fn(() => { draining = true; }),
+        // Test utility: push an RPC message with respond capability
+        _pushMessage: async (data, replySubject = null) => {
+            const msg = {
+                data: jc.encode(data),
+                subject: sub._subject || 'test.rpc',
+                reply: replySubject,
+                json: () => data,
+                respond: vi.fn((responseData) => {}),
+            };
+            messages.push(msg);
+            if (callback) {
+                await callback(msg);
+            }
+            return msg;
+        },
+        _subject: 'test.rpc',
+    };
+
+    return sub;
 }
 
 export function createMockCodec() {
@@ -110,10 +207,12 @@ export function createMockCodec() {
 export function createMockContext(overrides = {}) {
     const natsClient = createMockNatsClient(overrides.responses || {});
     const jetstream = createMockJetStream(overrides.consumer);
+    const kvBucket = overrides.kvBucket || createMockKVBucket();
 
     const ctx = {
         natsClient,
         jetstream,
+        kvBucket,
         codec: createMockCodec(),
         orgID: overrides.orgID || 'test_org_123',
         env: overrides.env || 'production',
