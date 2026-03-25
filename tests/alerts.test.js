@@ -67,6 +67,108 @@ describe('AlertManager', () => {
         });
     });
 
+    describe('createEphemeral', () => {
+        it('creates ephemeral alert with valid recovery_eval_type', async () => {
+            const ctx = makeCtx(undefined, {
+                'api.iot.alerts.test_org_123.create_ephemeral': {
+                    status: 'ALERT_CREATE_SUCCESS',
+                    data: { id: 'eph_1', name: 'evt_alert', type: 'EPHEMERAL' },
+                },
+            });
+            const am = new AlertManager(ctx);
+
+            const alert = await am.createEphemeral({
+                name: 'evt_alert',
+                config: {
+                    topic: { source: 'EVENT', device_ident: 's-1', last_token: 'door_opened' },
+                    duration: 1,
+                    recovery_duration: 5,
+                    recovery_eval_type: 'TIMER',
+                },
+            });
+
+            expect(alert.id).toBe('eph_1');
+            expect(typeof alert.setEvaluator).toBe('function');
+        });
+
+        it('rejects invalid recovery_eval_type', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.createEphemeral({
+                name: 'x',
+                config: {
+                    topic: { source: 'TELEMETRY', device_ident: 's-1', last_token: 'temp' },
+                    duration: 1,
+                    recovery_duration: 1,
+                    recovery_eval_type: 'BOGUS',
+                },
+            })).rejects.toThrow('recovery_eval_type');
+        });
+
+        it('rejects invalid source', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.createEphemeral({
+                name: 'x',
+                config: {
+                    topic: { source: 'INVALID', device_ident: 's-1', last_token: 'temp' },
+                    duration: 1,
+                    recovery_duration: 1,
+                },
+            })).rejects.toThrow('source must be');
+        });
+    });
+
+    describe('updateEphemeral', () => {
+        it('rejects invalid recovery_eval_type', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await expect(am.updateEphemeral({
+                id: 'eph_1',
+                config: { recovery_eval_type: 'INVALID' },
+            })).rejects.toThrow('recovery_eval_type');
+        });
+
+        it('accepts valid recovery_eval_type', async () => {
+            const ctx = makeCtx(undefined, {
+                'api.iot.alerts.test_org_123.update_ephemeral': {
+                    status: 'ALERT_UPDATE_SUCCESS',
+                    data: { id: 'eph_1', type: 'EPHEMERAL' },
+                },
+            });
+            const am = new AlertManager(ctx);
+
+            const result = await am.updateEphemeral({
+                id: 'eph_1',
+                config: { recovery_eval_type: 'TIMER' },
+            });
+
+            expect(result.id).toBe('eph_1');
+        });
+    });
+
+    describe('update', () => {
+        it('injects env into payload', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+
+            await am.update({ id: 'rule_1', name: 'updated' });
+
+            const [, rawData] = ctx.natsClient.request.mock.calls[0];
+            const payload = JSON.parse(new TextDecoder().decode(rawData));
+            expect(payload.env).toBe('production');
+        });
+
+        it('throws on missing id', async () => {
+            const ctx = makeCtx();
+            const am = new AlertManager(ctx);
+            await expect(am.update({ name: 'x' })).rejects.toThrow('id is required');
+        });
+    });
+
     describe('delete', () => {
         it('returns true on success', async () => {
             const ctx = makeCtx();
