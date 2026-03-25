@@ -445,8 +445,6 @@ export class EphemeralOwner {
             const entry = await kv.get(key);
             const str = entry?.string();
 
-            console.log(`Lock => ${str}`)
-
             if (str && str.length > 0) {
                 const lockData = JSON.parse(str);
 
@@ -460,7 +458,6 @@ export class EphemeralOwner {
             }
         } catch (err) {
             // Key not found
-            console.log(err)
         }
 
         // No active lock — write and verify
