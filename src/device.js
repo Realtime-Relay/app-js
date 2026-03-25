@@ -66,8 +66,9 @@ export class DeviceManager {
             try {
                 const id = await this.resolveDeviceId(ident);
                 ids.push(id);
-            } catch {
+            } catch (err) {
                 // Skip unfound devices
+                this.#ctx.logger.error('Failed to resolve device ID', err);
             }
         }
 

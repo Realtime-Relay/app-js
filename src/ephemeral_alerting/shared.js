@@ -95,8 +95,9 @@ export async function dispatchNotifications(ctx, rule, data) {
             }),
             { timeout: 10000 }
         );
-    } catch {
+    } catch (err) {
         // Notification dispatch failure should not block alerting
+        ctx.logger.error('Failed to dispatch notification', err);
     }
 }
 

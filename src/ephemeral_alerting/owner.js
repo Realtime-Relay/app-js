@@ -49,7 +49,7 @@ export class EphemeralOwner {
         }
 
         for (const sub of this.#rpcSubscriptions) {
-            try { await sub.drain(); } catch { /* ignore */ }
+            try { await sub.drain(); } catch (err) { this.#ctx.logger.error('Failed to drain RPC subscription', err); }
         }
         this.#rpcSubscriptions = [];
 
@@ -154,7 +154,7 @@ export class EphemeralOwner {
                         case 'mute': this.#handleMuteRPC(msg); break;
                         default: break;
                     }
-                } catch { /* ignore */ }
+                } catch (err) { this.#ctx.logger.error('Error processing RPC message', err); }
             }
         })();
     }
@@ -240,8 +240,9 @@ export class EphemeralOwner {
                 codec.encode(payload),
                 { timeout: 10000 }
             );
-        } catch {
+        } catch (err) {
             // Sync failure should not block mute operation
+            this.#ctx.logger.error('Failed to sync mute to backend', err);
         }
     }
 
@@ -464,8 +465,9 @@ export class EphemeralOwner {
                     expires_at: Date.now() + 30000,
                 });
                 await this.#kvBucket.put(key, value);
-            } catch {
+            } catch (err) {
                 // Heartbeat failure — lock may be lost
+                this.#ctx.logger.error('Heartbeat tick failed', err);
             }
         }, 15000);
     }
@@ -479,8 +481,9 @@ export class EphemeralOwner {
         if (this.#kvBucket) {
             try {
                 await this.#kvBucket.delete(`ephemeral_owner_${this.#rule.id}`);
-            } catch {
+            } catch (err) {
                 // Ignore — key may not exist
+                this.#ctx.logger.error('Failed to release lock', err);
             }
             this.#kvBucket = null;
         }

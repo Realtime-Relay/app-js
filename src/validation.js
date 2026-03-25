@@ -88,8 +88,8 @@ export function validateConnected(connected) {
 }
 
 export function validatePositiveNumber(value, fieldName) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-        throw new Error(`${fieldName} must be a positive number`);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`${fieldName} must be a non-negative number`);
     }
 }
 

@@ -111,6 +111,7 @@ export class AlertManager {
             config: config.config,
             notification_channel: config.notification_channel || [],
             alert_mute_config: config.alert_mute_config,
+            env: this.#ctx.env,
         };
 
         const res = await this.#request('create', payload);

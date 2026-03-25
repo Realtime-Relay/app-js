@@ -55,6 +55,24 @@ export class RelayApp {
             connected: false,
             offlineBuffer: [],
 
+            logger: {
+                error(msg, err) {
+                    if (ctx.env === 'test') {
+                        console.error(`[relay-sdk] ERROR: ${msg}`);
+                        if (err) console.error(err);
+                    }
+                },
+                warn(msg) {
+                    if (ctx.env === 'test') console.warn(`[relay-sdk] WARN: ${msg}`);
+                },
+                info(msg) {
+                    if (ctx.env === 'test') console.log(`[relay-sdk] INFO: ${msg}`);
+                },
+                debug(msg) {
+                    if (ctx.env === 'test') console.log(`[relay-sdk] DEBUG: ${msg}`);
+                },
+            },
+
             /**
              * Publish via JetStream if connected, otherwise buffer for later.
              * Returns ack if published, null if buffered.

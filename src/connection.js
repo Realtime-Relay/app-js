@@ -67,8 +67,9 @@ export class ConnectionManager {
             try {
                 const kvm = new Kvm(this.#ctx.jetstream);
                 this.#ctx.kvBucket = await kvm.open(this.#ctx.orgID);
-            } catch {
+            } catch (err) {
                 // KV not available — ephemeral locking will be skipped
+                this.#ctx.logger.error('Failed to initialize KV bucket', err);
                 this.#ctx.kvBucket = null;
             }
 
@@ -191,8 +192,9 @@ export class ConnectionManager {
         for (const { subject, payload } of messages) {
             try {
                 await this.#ctx.jetstream.publish(subject, payload);
-            } catch {
+            } catch (err) {
                 // If publish fails during flush, discard — connection may drop again
+                this.#ctx.logger.error('Failed to flush buffered message', err);
             }
         }
     }

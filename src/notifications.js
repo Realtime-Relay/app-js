@@ -47,11 +47,13 @@ export class NotificationManager {
             if (!params.config.template) throw new Error('config.template is required for EMAIL');
         }
 
-        return this.#request('create', {
+        const res = await this.#request('create', {
             name: params.name,
             type: params.type,
             config: params.config,
         });
+
+        return res.data || null;
     }
 
     async update(params) {
@@ -64,11 +66,13 @@ export class NotificationManager {
 
         validateObject(params.config, 'config');
 
-        return this.#request('update', {
+        const res = await this.#request('update', {
             name: params.name,
             type: params.type,
             config: params.config,
         });
+
+        return res.data || null;
     }
 
     async delete(notifId) {
