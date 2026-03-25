@@ -75,12 +75,13 @@ describe('LogicalGroupManager', () => {
     });
 
     describe('get', () => {
-        it('returns group with stream method', async () => {
+        it('returns group with stream and off methods', async () => {
             const ctx = makeCtx();
             const lgm = new LogicalGroupManager(ctx);
             const group = await lgm.get('g1');
             expect(group.name).toBe('floor_1');
             expect(typeof group.stream).toBe('function');
+            expect(typeof group.off).toBe('function');
         });
     });
 
@@ -108,6 +109,29 @@ describe('LogicalGroupManager', () => {
             );
             expect(streamCall).toBeDefined();
             expect(streamCall[1].filter_subjects).toBe('import.test_org_123.production.group.listen.g1');
+        });
+    });
+
+    describe('off', () => {
+        it('deletes the consumer for the group', async () => {
+            const consumer = createMockConsumer();
+            const ctx = makeCtx(consumer);
+            const lgm = new LogicalGroupManager(ctx);
+            const group = await lgm.get('g1');
+
+            await group.stream({ callback: vi.fn() });
+            await group.off();
+
+            expect(consumer.delete).toHaveBeenCalled();
+        });
+
+        it('no-op if no active stream', async () => {
+            const ctx = makeCtx();
+            const lgm = new LogicalGroupManager(ctx);
+            const group = await lgm.get('g1');
+
+            // Should not throw
+            await group.off();
         });
     });
 });

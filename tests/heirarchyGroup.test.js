@@ -65,12 +65,13 @@ describe('HeirarchyGroupManager', () => {
     });
 
     describe('get', () => {
-        it('returns group with stream method', async () => {
+        it('returns group with stream and off methods', async () => {
             const ctx = makeCtx();
             const hgm = new HeirarchyGroupManager(ctx);
             const group = await hgm.get('hg1');
             expect(group.name).toBe('building_a');
             expect(typeof group.stream).toBe('function');
+            expect(typeof group.off).toBe('function');
         });
     });
 
@@ -107,6 +108,28 @@ describe('HeirarchyGroupManager', () => {
 
             // Should not throw — wildcards allowed in stream filter
             await expect(group.stream({ heirarchy: 'building_a.*', callback: vi.fn() })).resolves.toBeUndefined();
+        });
+    });
+
+    describe('off', () => {
+        it('deletes the consumer for the group', async () => {
+            const consumer = createMockConsumer();
+            const ctx = makeCtx(consumer);
+            const hgm = new HeirarchyGroupManager(ctx);
+            const group = await hgm.get('hg1');
+
+            await group.stream({ callback: vi.fn() });
+            await group.off();
+
+            expect(consumer.delete).toHaveBeenCalled();
+        });
+
+        it('no-op if no active stream', async () => {
+            const ctx = makeCtx();
+            const hgm = new HeirarchyGroupManager(ctx);
+            const group = await hgm.get('hg1');
+
+            await group.off();
         });
     });
 });

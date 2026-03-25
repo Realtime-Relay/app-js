@@ -32,8 +32,18 @@ export class LogicalGroupManager {
 
         const group = { ...data };
         group.stream = (params) => this.#streamGroup(data.id, params);
+        group.off = () => this.#offGroup(data.id);
 
         return group;
+    }
+
+    async #offGroup(groupId) {
+        const consumer = this.#streamConsumers.get(groupId);
+
+        if (consumer) {
+            await consumer.delete();
+            this.#streamConsumers.delete(groupId);
+        }
     }
 
     // ─── CRUD ────────────────────────────────────────────────
