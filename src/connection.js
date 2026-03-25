@@ -68,7 +68,6 @@ export class ConnectionManager {
                 const kvm = new Kvm(this.#ctx.jetstream);
                 this.#ctx.kvBucket = await kvm.open(this.#ctx.orgID);
             } catch (err) {
-                // KV not available — ephemeral locking will be skipped
                 this.#ctx.logger.error('Failed to initialize KV bucket', err);
                 this.#ctx.kvBucket = null;
             }

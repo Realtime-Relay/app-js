@@ -432,33 +432,52 @@ export class EphemeralOwner {
         this.#kvBucket = kv;
         const key = `ephemeral_owner_${this.#rule.id}`;
 
+        const now = Date.now();
+        const ownerId = crypto.randomUUID();
+        const lockValue = JSON.stringify({
+            owner_id: ownerId,
+            started_at: now,
+            expires_at: now + 30000,
+        });
+
+        // Check if lock exists and is active
         try {
             const entry = await kv.get(key);
-            const lockData = entry.json();
+            const str = entry?.string();
 
-            if (lockData.expires_at && Date.now() > lockData.expires_at) {
-                await kv.delete(key);
-            } else {
-                return false;
+            console.log(`Lock => ${str}`)
+
+            if (str && str.length > 0) {
+                const lockData = JSON.parse(str);
+
+                if (lockData.expires_at && now > lockData.expires_at) {
+                    // Expired — take over with CAS
+                    await kv.update(key, lockValue, entry.revision);
+                    return true;
+                } else {
+                    return false;
+                }
             }
         } catch (err) {
-            if (err.code !== 'KEY_NOT_FOUND' && !err.message?.includes('not found')) {
-                return true;
-            }
+            // Key not found
+            console.log(err)
         }
 
+        // No active lock — write and verify
         try {
-            const value = JSON.stringify({
-                started_at: Date.now(),
-                expires_at: Date.now() + 30000,
-            });
-            await kv.create(key, value);
-            return true;
-        } catch (err) {
-            if (err.code === 'KEY_EXISTS' || err.message?.includes('already exists')) {
-                return false;
+            await kv.put(key, lockValue);
+
+            // Re-read to verify we own it (handles race with another writer)
+            const verify = await kv.get(key);
+            const verifyData = JSON.parse(verify.string());
+
+            if (verifyData.owner_id === ownerId) {
+                return true;
             }
-            return true;
+
+            return false;
+        } catch (err) {
+            return false;
         }
     }
 
@@ -537,7 +556,7 @@ export class EphemeralOwner {
 
         if (this.#kvBucket) {
             try {
-                await this.#kvBucket.delete(`ephemeral_owner_${this.#rule.id}`);
+                await this.#kvBucket.purge(`ephemeral_owner_${this.#rule.id}`);
             } catch (err) {
                 // Ignore — key may not exist
                 this.#ctx.logger.error('Failed to release lock', err);
