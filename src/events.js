@@ -1,5 +1,5 @@
 import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateIdent, validateFunction, validateConnected } from './validation.js';
+import { validateEventName, validateFunction, validateConnected } from './validation.js';
 
 
 export class EventManager {
@@ -14,7 +14,7 @@ export class EventManager {
 
     async stream(params) {
         validateConnected(this.#ctx.connected);
-        validateIdent(params.name, 'name');
+        validateEventName(params.name);
         validateFunction(params.callback, 'callback');
 
         if (this.#consumers.has(params.name)) {
@@ -53,7 +53,7 @@ export class EventManager {
     }
 
     async off(params) {
-        validateIdent(params.name, 'name');
+        validateEventName(params.name);
 
         const consumer = this.#consumers.get(params.name);
 

@@ -1,6 +1,6 @@
 import { JSONCodec } from 'nats.ws';
 import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateIdent, validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
+import { validateIdent, validateTelemetryMetric, validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
 
 
 export class TelemetryManager {
@@ -19,10 +19,7 @@ export class TelemetryManager {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
 
-        if (params.metric == null || params.metric === '') {
-            throw new Error('metric is required');
-        }
-
+        validateTelemetryMetric(params.metric);
         validateFunction(params.callback, 'callback');
 
         // Validate metric against device schema

@@ -1,5 +1,5 @@
 import { JSONCodec } from 'nats.ws';
-import { validateIdent, validateConnected, validatePositiveNumber } from './validation.js';
+import { validateIdent, validateRpcName, validateConnected, validatePositiveNumber } from './validation.js';
 
 
 export class RPCManager {
@@ -14,7 +14,7 @@ export class RPCManager {
     async call(params) {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
-        validateIdent(params.name, 'name');
+        validateRpcName(params.name);
 
         if (params.timeout != null) {
             validatePositiveNumber(params.timeout, 'timeout');

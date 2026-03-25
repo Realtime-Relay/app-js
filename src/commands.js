@@ -1,6 +1,6 @@
 import { JSONCodec } from 'nats.ws';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
-import { validateIdent, validateNonEmptyArray, validateConnected, validateISO8601, validateObject } from './validation.js';
+import { validateIdent, validateCommandName, validateNonEmptyArray, validateConnected, validateISO8601, validateObject } from './validation.js';
 
 
 export class CommandManager {
@@ -13,7 +13,7 @@ export class CommandManager {
     }
 
     async send(params) {
-        validateIdent(params.name, 'name');
+        validateCommandName(params.name);
         validateNonEmptyArray(params.device_ident, 'device_ident');
 
         if (params.data == null) {
@@ -57,7 +57,7 @@ export class CommandManager {
 
     async history(params) {
         validateConnected(this.#ctx.connected);
-        validateIdent(params.name, 'name');
+        validateCommandName(params.name);
         validateNonEmptyArray(params.device_idents, 'device_idents');
         validateISO8601(params.start, 'start');
 

@@ -53,6 +53,64 @@ export function validateHierarchyWildcard(value, fieldName) {
     }
 }
 
+export function validateEventName(value) {
+    if (value == null || value === '') {
+        throw new Error('event name is required');
+    }
+
+    if (typeof value !== 'string') {
+        throw new Error('event name must be a string');
+    }
+
+    if (!IDENT_REGEX.test(value)) {
+        throw new Error('event name contains invalid characters. Allowed: a-z, A-Z, 0-9, _, -');
+    }
+}
+
+export function validateCommandName(value) {
+    if (value == null || value === '') {
+        throw new Error('command name is required');
+    }
+
+    if (typeof value !== 'string') {
+        throw new Error('command name must be a string');
+    }
+
+    if (!IDENT_REGEX.test(value)) {
+        throw new Error('command name contains invalid characters. Allowed: a-z, A-Z, 0-9, _, -');
+    }
+}
+
+export function validateRpcName(value) {
+    if (value == null || value === '') {
+        throw new Error('rpc name is required');
+    }
+
+    if (typeof value !== 'string') {
+        throw new Error('rpc name must be a string');
+    }
+
+    if (!IDENT_REGEX.test(value)) {
+        throw new Error('rpc name contains invalid characters. Allowed: a-z, A-Z, 0-9, _, -');
+    }
+}
+
+export function validateTelemetryMetric(value) {
+    if (value == null || value === '') {
+        throw new Error('metric is required');
+    }
+
+    if (typeof value !== 'string') {
+        throw new Error('metric must be a string');
+    }
+
+    if (value === '*') return;
+
+    if (!IDENT_REGEX.test(value)) {
+        throw new Error('metric contains invalid characters. Allowed: a-z, A-Z, 0-9, _, -');
+    }
+}
+
 export function validateFunction(value, fieldName) {
     if (value == null) {
         throw new Error(`${fieldName} is required`);

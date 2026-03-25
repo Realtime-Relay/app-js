@@ -3,6 +3,10 @@ import {
     validateIdent,
     validateHierarchyName,
     validateHierarchyWildcard,
+    validateEventName,
+    validateCommandName,
+    validateRpcName,
+    validateTelemetryMetric,
     validateFunction,
     validateNonEmptyArray,
     validateArray,
@@ -450,5 +454,78 @@ describe('validateStartBeforeEnd', () => {
 
     it('throws when times differ by milliseconds but start >= end', () => {
         expect(() => validateStartBeforeEnd('2024-01-01T00:00:01Z', '2024-01-01T00:00:00Z')).toThrow(/start must be before end/);
+    });
+});
+
+describe('validateEventName', () => {
+    it('accepts valid event names', () => {
+        expect(() => validateEventName('door_opened')).not.toThrow();
+        expect(() => validateEventName('motion-detected')).not.toThrow();
+    });
+
+    it('rejects empty', () => {
+        expect(() => validateEventName('')).toThrow(/event name is required/);
+    });
+
+    it('rejects null', () => {
+        expect(() => validateEventName(null)).toThrow(/event name is required/);
+    });
+
+    it('rejects invalid characters', () => {
+        expect(() => validateEventName('door.opened')).toThrow(/invalid characters/);
+        expect(() => validateEventName('door opened')).toThrow(/invalid characters/);
+    });
+});
+
+describe('validateCommandName', () => {
+    it('accepts valid command names', () => {
+        expect(() => validateCommandName('reboot')).not.toThrow();
+        expect(() => validateCommandName('set_config')).not.toThrow();
+    });
+
+    it('rejects empty', () => {
+        expect(() => validateCommandName('')).toThrow(/command name is required/);
+    });
+
+    it('rejects invalid characters', () => {
+        expect(() => validateCommandName('set config')).toThrow(/invalid characters/);
+    });
+});
+
+describe('validateRpcName', () => {
+    it('accepts valid rpc names', () => {
+        expect(() => validateRpcName('get_status')).not.toThrow();
+        expect(() => validateRpcName('ping')).not.toThrow();
+    });
+
+    it('rejects empty', () => {
+        expect(() => validateRpcName('')).toThrow(/rpc name is required/);
+    });
+
+    it('rejects invalid characters', () => {
+        expect(() => validateRpcName('get status')).toThrow(/invalid characters/);
+    });
+});
+
+describe('validateTelemetryMetric', () => {
+    it('accepts valid metric names', () => {
+        expect(() => validateTelemetryMetric('temperature')).not.toThrow();
+        expect(() => validateTelemetryMetric('cpu_usage')).not.toThrow();
+    });
+
+    it('accepts wildcard', () => {
+        expect(() => validateTelemetryMetric('*')).not.toThrow();
+    });
+
+    it('rejects empty', () => {
+        expect(() => validateTelemetryMetric('')).toThrow(/metric is required/);
+    });
+
+    it('rejects null', () => {
+        expect(() => validateTelemetryMetric(null)).toThrow(/metric is required/);
+    });
+
+    it('rejects invalid characters', () => {
+        expect(() => validateTelemetryMetric('cpu.usage')).toThrow(/invalid characters/);
     });
 });
