@@ -30,6 +30,11 @@ export class RelayApp {
             throw new Error('mode must be "production" or "test"');
         }
 
+        const debug = config.debug ?? false;
+        if (typeof debug !== 'boolean') {
+            throw new Error('debug must be a boolean');
+        }
+
         // Decode orgID from api_key using nats-jwt decode()
         let orgID;
 
@@ -55,21 +60,23 @@ export class RelayApp {
             connected: false,
             offlineBuffer: [],
 
+            _debug: debug,
+
             logger: {
                 error(msg, err) {
-                    if (ctx.env === 'test') {
+                    if (ctx._debug) {
                         console.error(`[relay-sdk] ERROR: ${msg}`);
                         if (err) console.error(err);
                     }
                 },
                 warn(msg) {
-                    if (ctx.env === 'test') console.warn(`[relay-sdk] WARN: ${msg}`);
+                    if (ctx._debug) console.warn(`[relay-sdk] WARN: ${msg}`);
                 },
                 info(msg) {
-                    if (ctx.env === 'test') console.log(`[relay-sdk] INFO: ${msg}`);
+                    if (ctx._debug) console.log(`[relay-sdk] INFO: ${msg}`);
                 },
                 debug(msg) {
-                    if (ctx.env === 'test') console.log(`[relay-sdk] DEBUG: ${msg}`);
+                    if (ctx._debug) console.log(`[relay-sdk] DEBUG: ${msg}`);
                 },
             },
 
@@ -108,6 +115,14 @@ export class RelayApp {
         this.notification = new NotificationManager(ctx);
 
         this._ctx = ctx; // Exposed for testing only
+    }
+
+    setDebug(enabled) {
+        if (typeof enabled !== 'boolean') {
+            throw new Error('debug must be a boolean');
+        }
+
+        this._ctx._debug = enabled;
     }
 
     async connect() {
