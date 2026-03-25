@@ -54,7 +54,13 @@ export class TelemetryManager {
                 const data = msgpackDecode(msg.data);
                 msg.ack();
 
-                params.callback(data);
+                var tokens = msg.subject.split(".")
+                var metric = msg.subject.split(".")[tokens.length - 1]
+
+                params.callback({
+                    metric: metric,
+                    data: data
+                });
             },
         });
 
