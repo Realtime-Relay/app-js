@@ -137,6 +137,10 @@ export class AlertManager {
         validatePositiveNumber(config.config.duration, 'config.duration');
         validatePositiveNumber(config.config.recovery_duration, 'config.recovery_duration');
 
+        if (config.config.recovery_eval_type !== undefined && !['VALUE', 'TIMER'].includes(config.config.recovery_eval_type)) {
+            throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
+        }
+
         const payload = {
             name: config.name,
             description: config.description,
@@ -157,7 +161,7 @@ export class AlertManager {
 
         if (!config.id) throw new Error('id is required');
 
-        const res = await this.#request('update', config);
+        const res = await this.#request('update', { ...config, env: this.#ctx.env });
 
         if (res.data) return this.#wrapAlert(res.data);
         return res;
@@ -167,6 +171,10 @@ export class AlertManager {
         validateConnected(this.#ctx.connected);
 
         if (!config.id) throw new Error('id is required');
+
+        if (config.config?.recovery_eval_type !== undefined && !['VALUE', 'TIMER'].includes(config.config.recovery_eval_type)) {
+            throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
+        }
 
         const res = await this.#request('update_ephemeral', {
             ...config,

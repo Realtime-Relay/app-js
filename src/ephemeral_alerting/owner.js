@@ -17,6 +17,8 @@ export class EphemeralOwner {
     #rollingState = {};
     #kvBucket = null;
     #heartbeatInterval = null;
+    #recoveryInterval = null;
+    #lastDataAt = null;
     #state;
     #running = true;
 
@@ -36,12 +38,18 @@ export class EphemeralOwner {
         }
 
         this.#startHeartbeat();
+        this.#startRecoveryCheck();
         await this.#subscribeDataTopic();
         await this.#subscribeRPCs();
     }
 
     async stop() {
         this.#running = false;
+
+        if (this.#recoveryInterval) {
+            clearInterval(this.#recoveryInterval);
+            this.#recoveryInterval = null;
+        }
 
         if (this.#dataConsumer) {
             await this.#dataConsumer.delete();
@@ -127,6 +135,7 @@ export class EphemeralOwner {
                 msg.working();
                 const data = msgpackDecode(msg.data);
                 msg.ack();
+                this.#lastDataAt = Date.now();
                 this.#updateRollingState(msg.subject, data);
                 await this.#evaluate(msg.subject, data);
             },
@@ -470,6 +479,54 @@ export class EphemeralOwner {
                 this.#ctx.logger.error('Heartbeat tick failed', err);
             }
         }, 15000);
+    }
+
+    #startRecoveryCheck() {
+        const recoveryEvalType = this.#rule.config?.recovery_eval_type || 'VALUE';
+        if (recoveryEvalType !== 'TIMER') return;
+
+        const recoveryS = this.#rule.config?.recovery_duration || 0;
+        const recoveryMs = recoveryS * 1000;
+
+        const tickMs = (recoveryS > 0 ? Math.max(1, Math.min(30, recoveryS / 2)) : 5) * 1000;
+
+        this.#recoveryInterval = setInterval(async () => {
+            if (!this.#running) return;
+
+            if (this.#state.status !== 'alerting' && this.#state.status !== 'acknowledged') return;
+
+            if (this.#lastDataAt === null) return;
+
+            const now = Date.now();
+            const silenceMs = now - this.#lastDataAt;
+
+            if (silenceMs >= recoveryMs) {
+                const resolvedPayload = buildAlertPayload(this.#rule, this.#rollingState, now, '');
+                await publishEvent(this.#ctx, this.#rule, 'resolved', resolvedPayload);
+
+                await dispatchNotifications(this.#ctx, this.#rule, {
+                    alert: {
+                        id: this.#rule.id,
+                        name: this.#rule.name,
+                        config: this.#rule.config,
+                    },
+                    device_id: '',
+                    last_value: this.#rollingState,
+                    timestamp: now,
+                });
+
+                if (this.#callbacks.onResolved) {
+                    this.#callbacks.onResolved(resolvedPayload);
+                }
+
+                this.#state.status = 'normal';
+                this.#state.acked_by = null;
+                this.#state.acked_at = null;
+                this.#state.ack_notes = null;
+                this.#state.breached_since = null;
+                this.#state.clear_since = null;
+            }
+        }, tickMs);
     }
 
     async #releaseLock() {
