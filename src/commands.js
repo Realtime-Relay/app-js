@@ -95,42 +95,63 @@ export class CommandManager {
         }
 
         var res = null;
+        var commandHistory = {}
+        var startCursor = params.start
 
-        try{
-            res = await this.#ctx.natsClient.request(
-                `api.iot.db.${this.#ctx.orgID}.command.history`,
-                this.#codec.encode({
-                    device_ids: deviceIds,
-                    env: this.#ctx.env,
-                    command_name: params.name,
-                    start: params.start,
-                    end,
-                }),
-                { timeout: 20000 }
-            );
-        }catch(err){
-            this.#ctx.logger.error("Command history request failed", err)
-
-            throw new Error("Command history request timed-out")
+        for(let ident of params.device_idents){
+            commandHistory[ident] = [];
         }
 
-        const decoded = msgpackDecode(res.data)
+        while(true){
+            try{
+                res = await this.#ctx.natsClient.request(
+                    `api.iot.db.${this.#ctx.orgID}.command.history`,
+                    this.#codec.encode({
+                        device_ids: deviceIds,
+                        env: this.#ctx.env,
+                        command_name: params.name,
+                        start: startCursor,
+                        end,
+                    }),
+                    { timeout: 20000 }
+                );
 
-        // Remap device_id keys back to idents
-        const result = {};
+                const decoded = msgpackDecode(res.data)
 
-        if (decoded.data && typeof decoded.data === 'object') {
-            for (const [deviceId, records] of Object.entries(decoded.data)) {
-                const ident = idToIdent[deviceId] || deviceId;
-                result[ident] = records;
+                if(decoded.status == "COMMAND_FETCH_SUCCESS"){
+                    var data = decoded.data;
+
+                    var hasMore = data.has_more
+
+                    var commandPage = data.data;
+
+                    for (const [deviceId, records] of Object.entries(commandPage)) {
+                        const ident = idToIdent[deviceId] || deviceId;
+
+                        commandHistory[ident] = commandHistory[ident].concat(records)
+                    }
+
+                    if(hasMore){
+                        startCursor = data.cursor;
+
+                        continue;
+                    }else{
+                        // We got all the data, we're done
+
+                        break;
+                    }
+                }else{
+                    // We weren't able to fetch command history
+
+                    break;
+                }
+            }catch(err){
+                console.error("Command history request failed", err)
+
+                throw new Error("Command history request timed-out")
             }
         }
 
-        // Mark unfound idents
-        for (const ident of unfound) {
-            result[ident] = { error: 'Device not found' };
-        }
-
-        return result;
+        return commandHistory;
     }
 }
