@@ -66,25 +66,27 @@ async function run() {
             continue;
         }
 
-        const metric = (await ask('Metric (* for all): ')).trim() || '*';
+        const metricRaw = (await ask('Metrics (* for all, or comma-separated): ')).trim() || '*';
+        const metric = metricRaw === '*' ? '*' : metricRaw.split(',').map((m) => m.trim()).filter(Boolean);
 
         if (op === 'on') {
-            const result = await app.telemetry.stream({
+            const label = Array.isArray(metric) ? metric.join(',') : '*';
+            await app.telemetry.stream({
                 device_ident: ident,
                 metric,
                 callback: (data) => {
-                    console.log(`[telemetry] ${ident}/${metric}:`, data);
+                    console.log(`[telemetry] ${ident}/${data.metric}:`, data.data);
                 },
             });
-            console.log(result ? `Streaming ${ident}/${metric}` : `Already streaming ${ident}/${metric}`);
+            console.log(`Streaming ${ident}/${label}`);
 
         } else {
             if (metric === '*') {
                 await app.telemetry.off({ device_ident: ident });
                 console.log(`Stopped all telemetry for ${ident}`);
             } else {
-                await app.telemetry.off({ device_ident: ident, metric: [metric] });
-                console.log(`Stopped telemetry for ${ident}/${metric}`);
+                await app.telemetry.off({ device_ident: ident, metric });
+                console.log(`Stopped telemetry for ${ident}/${metric.join(',')}`);
             }
         }
     }
