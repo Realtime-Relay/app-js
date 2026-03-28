@@ -1,5 +1,6 @@
 import { RelayApp } from '../src/index.js';
 import { createInterface } from 'readline';
+import { writeFileSync } from "fs";
 
 const app = new RelayApp({
     api_key: process.env.RELAY_API_KEY,
@@ -42,13 +43,18 @@ async function run() {
                 continue; 
             }
 
-            const data = await app.telemetry.history({ 
+            const data = await app.telemetry.latest({ 
                 device_ident: ident, 
                 fields,
                 start: '2025-01-01T00:00:00.000Z',
                 end: '2026-12-31T23:59:59.000Z',
             });
             console.log('Latest (24h):', JSON.stringify(data, null, 2));
+
+            writeFileSync("data.json", JSON.stringify(data, null, 2), "utf-8")
+
+            console.log(data.temperature.length)
+            console.log(data.humidity.length)
 
             const serialized = JSON.stringify(data);
             const sizeInBytes = new TextEncoder().encode(serialized).length;

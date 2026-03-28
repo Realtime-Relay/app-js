@@ -1,7 +1,8 @@
 import { JSONCodec } from 'nats.ws';
-import { decode as msgpackDecode } from '@msgpack/msgpack';
-import { validateIdent, validateTelemetryMetric, validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
-
+import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
+import { validateIdent, 
+    validateTelemetryMetric, 
+    validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
 
 export class TelemetryManager {
 
@@ -111,30 +112,64 @@ export class TelemetryManager {
 
         var res = null;
 
-        try{
-            res = await this.#ctx.natsClient.request(
-                `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
-                this.#codec.encode({
-                    device_id: deviceId,
-                    env: this.#ctx.env,
-                    start: params.start,
-                    end: params.end,
-                    fields: params.fields,
-                    last_value: false
-                }),
-                { timeout: 20000 }
-            );
+        var startCursor = params.start
+        var telemetry = {};
 
-            res = msgpackDecode(res.data)
-        }catch(err){
-            this.#ctx.logger.error("Telemetry history request failed", err)
-
-            throw new Error("Telemetry history request timed-out")
+        for(let field of params.fields){
+            telemetry[field] = []
         }
 
-        var data = res.status == "TELEMETRY_FETCH_SUCCESS" ? res.data : []
+        while(true){
+            try{
+                res = await this.#ctx.natsClient.request(
+                    `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+                    this.#codec.encode({
+                        device_id: deviceId,
+                        env: this.#ctx.env,
+                        start: startCursor,
+                        end: params.end,
+                        fields: params.fields,
+                        last_value: false
+                    }),
+                    { timeout: 20000 }
+                );
 
-        return data
+                res = msgpackDecode(res.data)
+
+                if(res.status == "TELEMETRY_FETCH_SUCCESS"){
+                    var data = res.data;
+
+                    var hasMore = data.has_more
+
+                    var telemetryPage = data.data;
+
+                    for(let metric of Object.keys(telemetryPage)){
+                        telemetry[metric] = telemetry[metric].concat(telemetryPage[metric])
+                    }
+
+                    if(hasMore){
+                        startCursor = data.cursor;
+
+                        continue;
+                    }else{
+                        // We got all the data, we're done
+
+                        break;
+                    }
+                }else{
+                    // We weren't able to fetch tlm
+
+                    break;
+                }
+            }catch(err){
+                console.log(err)
+                this.#ctx.logger.error("Telemetry history request failed", err)
+
+                throw new Error("Telemetry history request timed-out")
+            }
+        }
+
+        return telemetry
     }
 
     async latest(params) {
@@ -167,6 +202,8 @@ export class TelemetryManager {
             );
 
             res = msgpackDecode(res.data)
+
+            console.log(res)
         }catch(err){
             this.#ctx.logger.error("Telemetry history request failed", err)
 
@@ -175,8 +212,8 @@ export class TelemetryManager {
 
         var latestValues = {};
 
-        if(data.status == "TELEMETRY_FETCH_SUCCESS"){
-            data = data.data;
+        if(res.status == "TELEMETRY_FETCH_SUCCESS"){
+            var data = res.data.data;
 
             for(let key of Object.keys(data)){
                 latestValues[key] = data[key][0];
