@@ -97,22 +97,26 @@
  *
  * @nats_subject api.iot.db.{orgID}.command.history
  * @nats_type request
- * @encoding JSONCodec
+ * @encoding JSONCodec (request) / msgpack (response)
  *
  * @request_payload
  * {
  *     device_ids: string[],     // Only found device IDs (unfound are excluded)
  *     env: string,              // From app mode
  *     command_name: string,     // The command name
- *     start: string,            // ISO8601 datetime
+ *     start: string,            // ISO8601 datetime (cursor on subsequent pages)
  *     end: string               // ISO8601 datetime (defaults to now())
  * }
  *
- * @response_payload
- * // Success (backend returns data keyed by device_id):
+ * @response_payload (msgpack decoded)
+ * // Success (backend returns paginated data keyed by device_id):
  * {
  *     status: "COMMAND_FETCH_SUCCESS",
- *     data: { "<device_id>": array }
+ *     data: {
+ *         has_more: boolean,              // true if more pages exist
+ *         cursor: string,                 // ISO8601 cursor for next page (if has_more)
+ *         data: { "<device_id>": array }  // command records for this page
+ *     }
  * }
  * // Failure:
  * {
@@ -120,17 +124,26 @@
  *     data: { msg: string[] }
  * }
  *
+ * @pagination
+ * - Uses a while(true) loop with cursor-based pagination
+ * - First request uses params.start as the start cursor
+ * - If response has has_more=true, sets startCursor = data.cursor and loops
+ * - If response has has_more=false or status is not SUCCESS, breaks
+ * - Accumulates records across pages: commandHistory[ident].concat(records)
+ * - Pre-initializes commandHistory with empty arrays for all requested idents
+ * - Request timeout: 20000ms
+ *
  * @behavior
  * - Resolves device_idents to device_ids via device cache
  * - Unfound idents are SKIPPED from the request, marked with error in result
- * - Sends a single NATS request with only found device_ids
- * - If all idents are unfound, skips the request entirely
- * - Remaps backend response keys from device_id → ident
+ * - If all idents are unfound, skips the request entirely and returns error map
+ * - Remaps backend response keys from device_id → ident on each page
  * - If end is not provided, defaults to current time: new Date().toISOString()
+ * - On non-success status: breaks loop (returns whatever has been accumulated)
+ * - On transport/timeout error: throws Error("Command history request timed-out")
  * - Returns a per-ident map:
  *     { "<ident>": [ ...records ] }                  — found device with history
  *     { "<ident>": { error: "Device not found" } }   — ident could not be resolved
- * - Throws on transport/timeout error
  *
  * @returns {Promise<Object.<string, (array|{ error: string })>>}
  *          Map of ident → history records or error

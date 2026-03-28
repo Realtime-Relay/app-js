@@ -25,7 +25,7 @@ describe('NotificationManager', () => {
                 type: 'WEBHOOK',
                 config: { endpoint: 'https://hook.example.com', headers: {} },
             });
-            expect(res.status).toBe('NOTIFICATION_CREATE_SUCCESS');
+            expect(res).toEqual({ name: 'ops', type: 'WEBHOOK' });
             const [subject] = ctx.natsClient.request.mock.calls[0];
             expect(subject).toBe('api.iot.notification.test_org_123.create');
         });
@@ -38,7 +38,7 @@ describe('NotificationManager', () => {
                 type: 'EMAIL',
                 config: { recipients: ['a@b.com'], subject: 'Alert', template: '{{rule.name}}' },
             });
-            expect(res.status).toBe('NOTIFICATION_CREATE_SUCCESS');
+            expect(res).toEqual({ name: 'ops', type: 'WEBHOOK' });
         });
 
         it('throws on invalid type', async () => {

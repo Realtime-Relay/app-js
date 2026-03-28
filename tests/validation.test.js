@@ -364,28 +364,28 @@ describe('validatePositiveNumber', () => {
         expect(() => validatePositiveNumber(999999, 'field')).not.toThrow();
     });
 
-    it('rejects zero', () => {
-        expect(() => validatePositiveNumber(0, 'field')).toThrow(/positive number/);
+    it('accepts zero', () => {
+        expect(() => validatePositiveNumber(0, 'field')).not.toThrow();
     });
 
     it('rejects a negative number', () => {
-        expect(() => validatePositiveNumber(-1, 'field')).toThrow(/positive number/);
+        expect(() => validatePositiveNumber(-1, 'field')).toThrow(/non-negative number/);
     });
 
     it('rejects NaN', () => {
-        expect(() => validatePositiveNumber(NaN, 'field')).toThrow(/positive number/);
+        expect(() => validatePositiveNumber(NaN, 'field')).toThrow(/non-negative number/);
     });
 
     it('rejects a string', () => {
-        expect(() => validatePositiveNumber('5', 'field')).toThrow(/positive number/);
+        expect(() => validatePositiveNumber('5', 'field')).toThrow(/non-negative number/);
     });
 
     it('rejects null', () => {
-        expect(() => validatePositiveNumber(null, 'field')).toThrow(/positive number/);
+        expect(() => validatePositiveNumber(null, 'field')).toThrow(/non-negative number/);
     });
 
     it('rejects undefined', () => {
-        expect(() => validatePositiveNumber(undefined, 'field')).toThrow(/positive number/);
+        expect(() => validatePositiveNumber(undefined, 'field')).toThrow(/non-negative number/);
     });
 });
 

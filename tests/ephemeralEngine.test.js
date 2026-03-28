@@ -51,6 +51,7 @@ const RULE_EVENT = {
 function makeCtx(kvBucket) {
     const consumer = createMockConsumer();
     const ctx = createMockContext({ consumer, kvBucket });
+    ctx.logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
     const device = new DeviceManager(ctx);
     ctx.device = device;
     device.cache.set('sensor_01', { id: 'dev_1', ident: 'sensor_01' });
@@ -166,7 +167,7 @@ describe('EphemeralEngine', () => {
             engine.setEvaluator(() => false);
             await engine.listen({});
 
-            expect(kvBucket.create).toHaveBeenCalledWith(
+            expect(kvBucket.put).toHaveBeenCalledWith(
                 'ephemeral_owner_rule_eph_1',
                 expect.any(String)
             );
@@ -204,9 +205,12 @@ describe('EphemeralEngine', () => {
             engine.setEvaluator(() => false);
             await engine.listen({});
 
-            // Should have deleted the stale key and created a new one
-            expect(kvBucket.delete).toHaveBeenCalledWith('ephemeral_owner_rule_eph_1');
-            expect(kvBucket.create).toHaveBeenCalled();
+            // Should have taken over with CAS update
+            expect(kvBucket.update).toHaveBeenCalledWith(
+                'ephemeral_owner_rule_eph_1',
+                expect.any(String),
+                expect.any(Number)
+            );
             await engine.stop();
         });
 
@@ -219,7 +223,7 @@ describe('EphemeralEngine', () => {
 
             expect(kvBucket._store.has('ephemeral_owner_rule_eph_1')).toBe(true);
             await engine.stop();
-            expect(kvBucket.delete).toHaveBeenCalledWith('ephemeral_owner_rule_eph_1');
+            expect(kvBucket.purge).toHaveBeenCalledWith('ephemeral_owner_rule_eph_1');
         });
     });
 
@@ -384,6 +388,7 @@ describe('EphemeralEngine', () => {
 
         it('swallows dispatch errors', async () => {
             const { ctx } = makeCtx();
+            ctx.logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
             ctx.natsClient.request.mockRejectedValueOnce(new Error('timeout'));
 
             // Should not throw

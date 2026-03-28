@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { createMockContext } from './setup.js';
 import { DeviceManager } from '../src/device.js';
 import { CommandManager } from '../src/commands.js';
@@ -105,6 +106,20 @@ describe('CommandManager', () => {
     describe('history', () => {
         it('sends single request with device_ids array', async () => {
             const ctx = makeCtx();
+            ctx.natsClient.request = vi.fn(async (subject) => {
+                if (subject === 'api.iot.db.test_org_123.command.history') {
+                    return {
+                        data: msgpackEncode({
+                            status: 'COMMAND_FETCH_SUCCESS',
+                            data: {
+                                has_more: false,
+                                cursor: null,
+                                data: { dev_1: [{ value: {}, timestamp: 1000 }], dev_2: [] },
+                            },
+                        }),
+                    };
+                }
+            });
             const cm = new CommandManager(ctx);
 
             const result = await cm.history({
@@ -114,16 +129,26 @@ describe('CommandManager', () => {
                 end: '2025-01-02T00:00:00.000Z',
             });
 
-            // Single request with all device_ids
             const historyCalls = ctx.natsClient.request.mock.calls.filter(
                 ([subj]) => subj === 'api.iot.db.test_org_123.command.history'
             );
             expect(historyCalls).toHaveLength(1);
             expect(result).toBeDefined();
+            expect(result.sensor_01).toHaveLength(1);
         });
 
         it('defaults end to now() if omitted', async () => {
             const ctx = makeCtx();
+            ctx.natsClient.request = vi.fn(async (subject) => {
+                if (subject === 'api.iot.db.test_org_123.command.history') {
+                    return {
+                        data: msgpackEncode({
+                            status: 'COMMAND_FETCH_SUCCESS',
+                            data: { has_more: false, cursor: null, data: { dev_1: [] } },
+                        }),
+                    };
+                }
+            });
             const cm = new CommandManager(ctx);
 
             await cm.history({

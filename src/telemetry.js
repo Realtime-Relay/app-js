@@ -1,13 +1,12 @@
 import { JSONCodec } from 'nats.ws';
 import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
-import { validateIdent, 
-    validateTelemetryMetric, 
+import { validateIdent,
     validateFunction, validateConnected, validateArray, validateISO8601, validateStartBeforeEnd, validateNonEmptyArray } from './validation.js';
 
 export class TelemetryManager {
 
     #ctx;
-    #consumers = new Map(); // key: `${device_ident}:${metric}` -> consumer
+    #consumers = new Map(); // key: device_ident -> Array<{ consumer, metrics: Set|null, callback }>
     #codec = JSONCodec();
 
     constructor(ctx) {
@@ -19,27 +18,34 @@ export class TelemetryManager {
     async stream(params) {
         validateConnected(this.#ctx.connected);
         validateIdent(params.device_ident, 'device_ident');
-
-        validateTelemetryMetric(params.metric);
         validateFunction(params.callback, 'callback');
 
-        // Validate metric against device schema
-        await this.#validateMetric(params.device_ident, params.metric);
+        let metricsFilter = null;
 
-        const key = `${params.device_ident}:${params.metric}`;
+        if (typeof params.metric === 'string') {
+            if (params.metric !== '*') {
+                throw new Error('metric as a string must be "*". Use an array for specific metrics.');
+            }
+        } else if (Array.isArray(params.metric)) {
+            validateNonEmptyArray(params.metric, 'metric');
 
-        if (this.#consumers.has(key)) {
-            return false;
+            for (const m of params.metric) {
+                await this.#validateMetric(params.device_ident, m);
+            }
+
+            metricsFilter = new Set(params.metric);
+        } else {
+            throw new Error('metric must be "*" or a non-empty array of metric names');
         }
 
         const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
 
-        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceId}.${params.metric}`;
+        const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceId}.*`;
 
         const consumer = await this.#ctx.jetstream.consumers.get(
             `${this.#ctx.orgID}_stream`,
             {
-                name: `appjs_telemetry_${params.device_ident}_${params.metric}_${crypto.randomUUID()}`,
+                name: `appjs_telemetry_${params.device_ident}_${crypto.randomUUID()}`,
                 filter_subjects: subject,
                 replay_policy: 'instant',
                 opt_start_time: new Date(),
@@ -48,7 +54,13 @@ export class TelemetryManager {
             }
         );
 
-        this.#consumers.set(key, consumer);
+        const entry = { consumer, metrics: metricsFilter, callback: params.callback };
+
+        if (!this.#consumers.has(params.device_ident)) {
+            this.#consumers.set(params.device_ident, []);
+        }
+
+        this.#consumers.get(params.device_ident).push(entry);
 
         await consumer.consume({
             callback: async (msg) => {
@@ -56,8 +68,12 @@ export class TelemetryManager {
                 const data = msgpackDecode(msg.data);
                 msg.ack();
 
-                var tokens = msg.subject.split(".")
-                var metric = msg.subject.split(".")[tokens.length - 1]
+                var tokens = msg.subject.split(".");
+                var metric = tokens[tokens.length - 1];
+
+                if (entry.metrics !== null && !entry.metrics.has(metric)) {
+                    return;
+                }
 
                 params.callback({
                     metric: metric,
@@ -65,33 +81,41 @@ export class TelemetryManager {
                 });
             },
         });
-
-        return true;
     }
 
     async off(params) {
         validateIdent(params.device_ident, 'device_ident');
 
+        const subs = this.#consumers.get(params.device_ident);
+        if (!subs || subs.length === 0) return;
+
         if (params.metric !== undefined) {
             validateArray(params.metric, 'metric');
 
-            for (const m of params.metric) {
-                const key = `${params.device_ident}:${m}`;
-                const consumer = this.#consumers.get(key);
+            for (let i = subs.length - 1; i >= 0; i--) {
+                const sub = subs[i];
 
-                if (consumer) {
-                    await consumer.delete();
-                    this.#consumers.delete(key);
+                // Skip wildcard ("*") subscriptions — metrics is null
+                if (sub.metrics === null) continue;
+
+                for (const m of params.metric) {
+                    sub.metrics.delete(m);
                 }
+
+                if (sub.metrics.size === 0) {
+                    await sub.consumer.delete();
+                    subs.splice(i, 1);
+                }
+            }
+
+            if (subs.length === 0) {
+                this.#consumers.delete(params.device_ident);
             }
         } else {
-            // Kill all consumers for this device
-            for (const [key, consumer] of this.#consumers) {
-                if (key.startsWith(`${params.device_ident}:`)) {
-                    await consumer.delete();
-                    this.#consumers.delete(key);
-                }
+            for (const sub of subs) {
+                await sub.consumer.delete();
             }
+            this.#consumers.delete(params.device_ident);
         }
     }
 
@@ -265,8 +289,10 @@ export class TelemetryManager {
     // ─── Cleanup ─────────────────────────────────────────────
 
     async deleteAllConsumers() {
-        for (const [key, consumer] of this.#consumers) {
-            await consumer.delete();
+        for (const [deviceIdent, subs] of this.#consumers) {
+            for (const sub of subs) {
+                await sub.consumer.delete();
+            }
         }
 
         this.#consumers.clear();

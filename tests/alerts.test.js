@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
+import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { createMockContext, createMockConsumer } from './setup.js';
 import { DeviceManager } from '../src/device.js';
 import { AlertManager } from '../src/alerts.js';
+import { JSONCodec } from 'nats.ws';
+
+const jc = JSONCodec();
 
 function makeCtx(consumer, responseOverrides = {}) {
     const ctx = createMockContext({
@@ -275,8 +279,24 @@ describe('AlertManager', () => {
         const validStart = '2026-03-01T00:00:00.000Z';
         const validEnd = '2026-03-25T00:00:00.000Z';
 
+        const alertHistoryResponse = {
+            status: 'ALERT_FETCH_SUCCESS',
+            data: { fire: [{ timestamp: '2026-03-25T00:00:00.000Z', rule_id: 'rule_1' }], resolved: [] },
+        };
+
+        function withMsgpackHistory(ctx) {
+            const originalRequest = ctx.natsClient.request;
+            ctx.natsClient.request = vi.fn(async (subject, data, opts) => {
+                if (subject === 'api.iot.db.test_org_123.alerts.history') {
+                    return { data: msgpackEncode(alertHistoryResponse) };
+                }
+                return originalRequest(subject, data, opts);
+            });
+        }
+
         it('fetches history by DEVICE', async () => {
             const ctx = makeCtx();
+            withMsgpackHistory(ctx);
             const am = new AlertManager(ctx);
 
             const result = await am.history({
@@ -296,6 +316,7 @@ describe('AlertManager', () => {
 
         it('fetches history by RULE', async () => {
             const ctx = makeCtx();
+            withMsgpackHistory(ctx);
             const am = new AlertManager(ctx);
 
             const result = await am.history({
@@ -311,6 +332,7 @@ describe('AlertManager', () => {
 
         it('fetches history by RULE with optional device_ident', async () => {
             const ctx = makeCtx();
+            withMsgpackHistory(ctx);
             const am = new AlertManager(ctx);
 
             const result = await am.history({
@@ -327,6 +349,7 @@ describe('AlertManager', () => {
 
         it('resolves device_ident to device_id in payload', async () => {
             const ctx = makeCtx();
+            withMsgpackHistory(ctx);
             const am = new AlertManager(ctx);
 
             await am.history({
@@ -444,6 +467,7 @@ describe('AlertManager', () => {
 
         it('allows ack with rule_id present', async () => {
             const ctx = makeCtx();
+            withMsgpackHistory(ctx);
             const am = new AlertManager(ctx);
 
             const result = await am.history({

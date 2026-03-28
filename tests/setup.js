@@ -112,12 +112,18 @@ export function createMockKVBucket() {
                 throw err;
             }
             const value = _store.get(key);
-            return { value: jc.encode(value), json: () => value, revision: 1 };
+            const raw = typeof value === 'string' ? value : JSON.stringify(value);
+            return { value: jc.encode(value), json: () => value, string: () => raw, revision: 1 };
         }),
         put: vi.fn(async (key, value) => {
             const decoded = typeof value === 'string' ? JSON.parse(value) : value;
             _store.set(key, decoded);
             return 1; // revision
+        }),
+        update: vi.fn(async (key, value, revision) => {
+            const decoded = typeof value === 'string' ? JSON.parse(value) : value;
+            _store.set(key, decoded);
+            return 2; // new revision
         }),
         create: vi.fn(async (key, value) => {
             if (_store.has(key)) {

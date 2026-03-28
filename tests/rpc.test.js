@@ -48,11 +48,18 @@ describe('RPCManager', () => {
             await expect(rpc.call({ device_ident: 'gateway_01', timeout: 5, data: {} })).rejects.toThrow('name');
         });
 
-        it('throws on non-positive timeout', async () => {
+        it('throws on negative timeout', async () => {
             const ctx = makeCtx();
             const rpc = new RPCManager(ctx);
-            await expect(rpc.call({ device_ident: 'gateway_01', name: 'x', timeout: 0, data: {} })).rejects.toThrow('positive number');
-            await expect(rpc.call({ device_ident: 'gateway_01', name: 'x', timeout: -1, data: {} })).rejects.toThrow('positive number');
+            await expect(rpc.call({ device_ident: 'gateway_01', name: 'x', timeout: -1, data: {} })).rejects.toThrow('non-negative number');
+        });
+
+        it('accepts zero timeout', async () => {
+            const ctx = makeCtx();
+            const rpc = new RPCManager(ctx);
+            // timeout=0 is valid (non-negative), uses 0*1000=0 which is falsy, so falls back to default 10s
+            const res = await rpc.call({ device_ident: 'gateway_01', name: 'get_diagnostics', timeout: 0, data: {} });
+            expect(res).toBeDefined();
         });
 
         it('uses default 10s timeout when not provided', async () => {
