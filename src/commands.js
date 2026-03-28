@@ -1,5 +1,5 @@
 import { JSONCodec } from 'nats.ws';
-import { encode as msgpackEncode } from '@msgpack/msgpack';
+import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack';
 import { validateIdent, validateCommandName, validateNonEmptyArray, validateConnected, validateISO8601, validateObject } from './validation.js';
 
 
@@ -94,19 +94,27 @@ export class CommandManager {
             return result;
         }
 
-        const res = await this.#ctx.natsClient.request(
-            `api.iot.db.${this.#ctx.orgID}.command.history`,
-            this.#codec.encode({
-                device_ids: deviceIds,
-                env: this.#ctx.env,
-                command_name: params.name,
-                start: params.start,
-                end,
-            }),
-            { timeout: 20000 }
-        );
+        var res = null;
 
-        const decoded = this.#codec.decode(res.data);
+        try{
+            res = await this.#ctx.natsClient.request(
+                `api.iot.db.${this.#ctx.orgID}.command.history`,
+                this.#codec.encode({
+                    device_ids: deviceIds,
+                    env: this.#ctx.env,
+                    command_name: params.name,
+                    start: params.start,
+                    end,
+                }),
+                { timeout: 20000 }
+            );
+        }catch(err){
+            this.#ctx.logger.error("Command history request failed", err)
+
+            throw new Error("Command history request timed-out")
+        }
+
+        const decoded = msgpackDecode(res.data)
 
         // Remap device_id keys back to idents
         const result = {};

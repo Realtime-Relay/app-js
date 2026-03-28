@@ -32,6 +32,7 @@ export class TelemetryManager {
         }
 
         const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
+
         const subject = `${this.#ctx.orgID}.${this.#ctx.env}.telemetry.${deviceId}.${params.metric}`;
 
         const consumer = await this.#ctx.jetstream.consumers.get(
@@ -108,19 +109,32 @@ export class TelemetryManager {
 
         const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
 
-        const res = await this.#ctx.natsClient.request(
-            `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
-            this.#codec.encode({
-                device_id: deviceId,
-                env: this.#ctx.env,
-                start: params.start,
-                end: params.end,
-                fields: params.fields,
-            }),
-            { timeout: 20000 }
-        );
+        var res = null;
 
-        return res.json();
+        try{
+            res = await this.#ctx.natsClient.request(
+                `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+                this.#codec.encode({
+                    device_id: deviceId,
+                    env: this.#ctx.env,
+                    start: params.start,
+                    end: params.end,
+                    fields: params.fields,
+                    last_value: false
+                }),
+                { timeout: 20000 }
+            );
+
+            res = msgpackDecode(res.data)
+        }catch(err){
+            this.#ctx.logger.error("Telemetry history request failed", err)
+
+            throw new Error("Telemetry history request timed-out")
+        }
+
+        var data = res.status == "TELEMETRY_FETCH_SUCCESS" ? res.data : []
+
+        return data
     }
 
     async latest(params) {
@@ -130,24 +144,46 @@ export class TelemetryManager {
 
         await this.#validateFields(params.device_ident, params.fields);
 
-        const now = new Date();
-        const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        validateISO8601(params.start, 'start');
+        validateISO8601(params.end, 'end');
+        validateStartBeforeEnd(params.start, params.end);
 
         const deviceId = await this.#ctx.device.resolveDeviceId(params.device_ident);
 
-        const res = await this.#ctx.natsClient.request(
-            `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
-            this.#codec.encode({
-                device_id: deviceId,
-                env: this.#ctx.env,
-                start: oneDayAgo.toISOString(),
-                end: now.toISOString(),
-                fields: params.fields,
-            }),
-            { timeout: 20000 }
-        );
+        var res = null;
 
-        return res.json();
+        try{
+            res = await this.#ctx.natsClient.request(
+                `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+                this.#codec.encode({
+                    device_id: deviceId,
+                    env: this.#ctx.env,
+                    start: params.start,
+                    end: params.end,
+                    fields: params.fields,
+                    last_value: true
+                }),
+                { timeout: 20000 }
+            );
+
+            res = msgpackDecode(res.data)
+        }catch(err){
+            this.#ctx.logger.error("Telemetry history request failed", err)
+
+            throw new Error("Telemetry history request timed-out")
+        }
+
+        var latestValues = {};
+
+        if(data.status == "TELEMETRY_FETCH_SUCCESS"){
+            data = data.data;
+
+            for(let key of Object.keys(data)){
+                latestValues[key] = data[key][0];
+            }
+        }
+
+        return latestValues;
     }
 
     // ─── Validation ──────────────────────────────────────────

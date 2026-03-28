@@ -302,7 +302,7 @@ export class AlertManager {
             { timeout: 20000 }
         );
 
-        const decoded = this.#codec.decode(res.data);
+        const decoded = msgpackDecode(res.data)
 
         if (decoded.status === 'ALERT_FETCH_SUCCESS') {
             return decoded.data;

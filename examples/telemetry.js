@@ -36,10 +36,27 @@ async function run() {
         if (op === 'latest') {
             const fieldsRaw = (await ask('Fields (comma-separated): ')).trim();
             const fields = fieldsRaw.split(',').map((f) => f.trim()).filter(Boolean);
-            if (!fields.length) { console.log('At least one field required.'); continue; }
+            
+            if (!fields.length) { 
+                console.log('At least one field required.'); 
+                continue; 
+            }
 
-            const data = await app.telemetry.latest({ device_ident: ident, fields });
+            const data = await app.telemetry.history({ 
+                device_ident: ident, 
+                fields,
+                start: '2025-01-01T00:00:00.000Z',
+                end: '2026-12-31T23:59:59.000Z',
+            });
             console.log('Latest (24h):', JSON.stringify(data, null, 2));
+
+            const serialized = JSON.stringify(data);
+            const sizeInBytes = new TextEncoder().encode(serialized).length;
+            const sizeInKB = sizeInBytes / 1024;
+            const sizeInMB = sizeInKB / 1024;
+
+            console.log("Size (MB)", sizeInMB)
+
             continue;
         }
 
