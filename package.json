@@ -1,7 +1,7 @@
 {
-  "name": "@relayx/app-sdk",
-  "version": "0.1.2",
-  "description": "RelayX App SDK for IoT device management over NATS WebSocket",
+  "name": "@relay-x/app-sdk",
+  "version": "0.1.3",
+  "description": "RelayX App SDK for IoT device management",
   "type": "module",
   "main": "src/index.js",
   "exports": {
