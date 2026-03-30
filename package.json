@@ -20,6 +20,7 @@
     "nats.ws": "1.30.0"
   },
   "devDependencies": {
+    "prettier": "^3.8.1",
     "vitest": "^3.0.0"
   }
 }

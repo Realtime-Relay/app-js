@@ -1,539 +1,581 @@
-import { JSONCodec } from 'nats.ws';
-import { decode as msgpackDecode, encode as msgpackEncode } from '@msgpack/msgpack';
-import { validateIdent, validateConnected, validateFunction, validatePositiveNumber, validateNonEmptyArray, validateISO8601, validateStartBeforeEnd } from './validation.js';
-import { EphemeralEngine } from './ephemeral_alerting/index.js';
+import { JSONCodec } from "nats.ws";
+import {
+  decode as msgpackDecode,
+  encode as msgpackEncode,
+} from "@msgpack/msgpack";
+import {
+  validateIdent,
+  validateConnected,
+  validateFunction,
+  validatePositiveNumber,
+  validateNonEmptyArray,
+  validateISO8601,
+  validateStartBeforeEnd,
+} from "./validation.js";
+import { EphemeralEngine } from "./ephemeral_alerting/index.js";
 
-const VALID_SOURCES = ['TELEMETRY', 'COMMAND', 'EVENT'];
-const VALID_RULE_TYPES = ['DEVICE', 'RULE'];
-const VALID_RULE_STATES = ['fire', 'resolved', 'ack', 'ack_all'];
-
+const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
+const VALID_RULE_TYPES = ["DEVICE", "RULE"];
+const VALID_RULE_STATES = ["fire", "resolved", "ack", "ack_all"];
 
 export class AlertManager {
+  #ctx;
+  #codec = JSONCodec();
+  #listenConsumers = new Map(); // ruleId -> consumer[]
+  #ephemeralEngines = new Map(); // ruleId -> EphemeralEngine
+  #alertMetadata = new Map(); // alertId -> { type, ... }
 
-    #ctx;
-    #codec = JSONCodec();
-    #listenConsumers = new Map();     // ruleId -> consumer[]
-    #ephemeralEngines = new Map();    // ruleId -> EphemeralEngine
-    #alertMetadata = new Map();       // alertId -> { type, ... }
+  constructor(ctx) {
+    this.#ctx = ctx;
+  }
 
-    constructor(ctx) {
-        this.#ctx = ctx;
+  #subject(op) {
+    return `api.iot.alerts.${this.#ctx.orgID}.${op}`;
+  }
+
+  async #request(op, payload) {
+    const res = await this.#ctx.natsClient.request(
+      this.#subject(op),
+      this.#codec.encode(payload),
+      { timeout: 20000 },
+    );
+
+    return res.json();
+  }
+
+  // ─── Wrap non-ephemeral alert ────────────────────────────
+
+  #wrapAlert(data) {
+    if (!data) return data;
+
+    const alert = { ...data };
+
+    // Track metadata
+    if (data.id) {
+      this.#alertMetadata.set(data.id, { type: data.type || "THRESHOLD" });
     }
 
-    #subject(op) {
-        return `api.iot.alerts.${this.#ctx.orgID}.${op}`;
+    alert.listen = async (callbacks) => {
+      await this.#listen(data, callbacks);
+    };
+
+    alert.setEvaluator = (fn) => {
+      throw new Error("setEvaluator is only allowed for EPHEMERAL alerts");
+    };
+
+    return alert;
+  }
+
+  // ─── Wrap ephemeral alert ────────────────────────────────
+
+  #wrapEphemeralAlert(data) {
+    if (!data) return data;
+
+    const alert = { ...data };
+
+    // Track metadata
+    if (data.id) {
+      this.#alertMetadata.set(data.id, { type: "EPHEMERAL" });
     }
 
-    async #request(op, payload) {
-        const res = await this.#ctx.natsClient.request(
-            this.#subject(op),
-            this.#codec.encode(payload),
-            { timeout: 20000 }
-        );
+    const engine = new EphemeralEngine(this.#ctx, data);
+    this.#ephemeralEngines.set(data.id, engine);
 
-        return res.json();
+    alert.setEvaluator = (fn) => {
+      validateFunction(fn, "evaluator");
+      engine.setEvaluator(fn);
+    };
+
+    alert.listen = async (callbacks) => {
+      validateConnected(this.#ctx.connected);
+      await engine.listen(callbacks);
+    };
+
+    alert.stop = async () => {
+      await engine.stop();
+    };
+
+    return alert;
+  }
+
+  // ─── CRUD ────────────────────────────────────────────────
+
+  async create(config) {
+    validateConnected(this.#ctx.connected);
+    validateIdent(config.name, "name");
+
+    if (config.type === "EPHEMERAL") {
+      throw new Error("Use createEphemeral() for EPHEMERAL alerts");
     }
 
-    // ─── Wrap non-ephemeral alert ────────────────────────────
-
-    #wrapAlert(data) {
-        if (!data) return data;
-
-        const alert = { ...data };
-
-        // Track metadata
-        if (data.id) {
-            this.#alertMetadata.set(data.id, { type: data.type || 'THRESHOLD' });
-        }
-
-        alert.listen = async (callbacks) => {
-            await this.#listen(data, callbacks);
-        };
-
-        alert.setEvaluator = (fn) => {
-            throw new Error('setEvaluator is only allowed for EPHEMERAL alerts');
-        };
-
-        return alert;
+    if (!["THRESHOLD", "RATE_CHANGE"].includes(config.type)) {
+      throw new Error("type must be THRESHOLD or RATE_CHANGE");
     }
 
-    // ─── Wrap ephemeral alert ────────────────────────────────
+    const payload = {
+      name: config.name,
+      description: config.description,
+      type: config.type,
+      metric: config.metric,
+      config: config.config,
+      notification_channel: config.notification_channel || [],
+      alert_mute_config: config.alert_mute_config,
+      env: this.#ctx.env,
+    };
 
-    #wrapEphemeralAlert(data) {
-        if (!data) return data;
+    const res = await this.#request("create", payload);
 
-        const alert = { ...data };
+    if (res.data) return this.#wrapAlert(res.data);
+    return null;
+  }
 
-        // Track metadata
-        if (data.id) {
-            this.#alertMetadata.set(data.id, { type: 'EPHEMERAL' });
-        }
+  async createEphemeral(config) {
+    validateConnected(this.#ctx.connected);
+    validateIdent(config.name, "name");
 
-        const engine = new EphemeralEngine(this.#ctx, data);
-        this.#ephemeralEngines.set(data.id, engine);
+    if (!config.config) throw new Error("config is required");
+    if (!config.config.topic) throw new Error("config.topic is required");
 
-        alert.setEvaluator = (fn) => {
-            validateFunction(fn, 'evaluator');
-            engine.setEvaluator(fn);
-        };
-
-        alert.listen = async (callbacks) => {
-            validateConnected(this.#ctx.connected);
-            await engine.listen(callbacks);
-        };
-
-        alert.stop = async () => {
-            await engine.stop();
-        };
-
-        return alert;
+    if (!VALID_SOURCES.includes(config.config.topic.source)) {
+      throw new Error(
+        "config.topic.source must be TELEMETRY, COMMAND, or EVENT",
+      );
     }
 
-    // ─── CRUD ────────────────────────────────────────────────
+    if (!config.config.topic.device_ident)
+      throw new Error("config.topic.device_ident is required");
+    if (!config.config.topic.last_token)
+      throw new Error("config.topic.last_token is required");
 
-    async create(config) {
-        validateConnected(this.#ctx.connected);
-        validateIdent(config.name, 'name');
+    validatePositiveNumber(config.config.duration, "config.duration");
+    validatePositiveNumber(
+      config.config.recovery_duration,
+      "config.recovery_duration",
+    );
 
-        if (config.type === 'EPHEMERAL') {
-            throw new Error('Use createEphemeral() for EPHEMERAL alerts');
-        }
-
-        if (!['THRESHOLD', 'RATE_CHANGE'].includes(config.type)) {
-            throw new Error('type must be THRESHOLD or RATE_CHANGE');
-        }
-
-        const payload = {
-            name: config.name,
-            description: config.description,
-            type: config.type,
-            metric: config.metric,
-            config: config.config,
-            notification_channel: config.notification_channel || [],
-            alert_mute_config: config.alert_mute_config,
-            env: this.#ctx.env,
-        };
-
-        const res = await this.#request('create', payload);
-
-        if (res.data) return this.#wrapAlert(res.data);
-        return null;
+    if (
+      config.config.recovery_eval_type !== undefined &&
+      !["VALUE", "TIMER"].includes(config.config.recovery_eval_type)
+    ) {
+      throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
     }
 
-    async createEphemeral(config) {
-        validateConnected(this.#ctx.connected);
-        validateIdent(config.name, 'name');
+    const payload = {
+      name: config.name,
+      description: config.description,
+      config: config.config,
+      notification_channel: config.notification_channel || [],
+      type: "EPHEMERAL",
+      env: this.#ctx.env,
+    };
 
-        if (!config.config) throw new Error('config is required');
-        if (!config.config.topic) throw new Error('config.topic is required');
+    const res = await this.#request("create_ephemeral", payload);
 
-        if (!VALID_SOURCES.includes(config.config.topic.source)) {
-            throw new Error('config.topic.source must be TELEMETRY, COMMAND, or EVENT');
-        }
+    if (res.data) return this.#wrapEphemeralAlert(res.data);
+    return null;
+  }
 
-        if (!config.config.topic.device_ident) throw new Error('config.topic.device_ident is required');
-        if (!config.config.topic.last_token) throw new Error('config.topic.last_token is required');
+  async update(config) {
+    validateConnected(this.#ctx.connected);
 
-        validatePositiveNumber(config.config.duration, 'config.duration');
-        validatePositiveNumber(config.config.recovery_duration, 'config.recovery_duration');
+    if (!config.id) throw new Error("id is required");
 
-        if (config.config.recovery_eval_type !== undefined && !['VALUE', 'TIMER'].includes(config.config.recovery_eval_type)) {
-            throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
-        }
+    const res = await this.#request("update", {
+      ...config,
+      env: this.#ctx.env,
+    });
 
-        const payload = {
-            name: config.name,
-            description: config.description,
-            config: config.config,
-            notification_channel: config.notification_channel || [],
-            type: 'EPHEMERAL',
-            env: this.#ctx.env,
-        };
+    if (res.data) return this.#wrapAlert(res.data);
+    return res;
+  }
 
-        const res = await this.#request('create_ephemeral', payload);
+  async updateEphemeral(config) {
+    validateConnected(this.#ctx.connected);
 
-        if (res.data) return this.#wrapEphemeralAlert(res.data);
-        return null;
+    if (!config.id) throw new Error("id is required");
+
+    if (
+      config.config?.recovery_eval_type !== undefined &&
+      !["VALUE", "TIMER"].includes(config.config.recovery_eval_type)
+    ) {
+      throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
     }
 
-    async update(config) {
-        validateConnected(this.#ctx.connected);
+    const res = await this.#request("update_ephemeral", {
+      ...config,
+      type: "EPHEMERAL",
+      env: this.#ctx.env,
+    });
 
-        if (!config.id) throw new Error('id is required');
+    if (res.data) return this.#wrapEphemeralAlert(res.data);
+    return null;
+  }
 
-        const res = await this.#request('update', { ...config, env: this.#ctx.env });
+  async delete(alertId) {
+    validateConnected(this.#ctx.connected);
 
-        if (res.data) return this.#wrapAlert(res.data);
-        return res;
+    if (!alertId) throw new Error("id is required");
+
+    // Clean up engine if exists
+    const engine = this.#ephemeralEngines.get(alertId);
+    if (engine) {
+      await engine.stop();
+      this.#ephemeralEngines.delete(alertId);
+    }
+    this.#alertMetadata.delete(alertId);
+
+    const res = await this.#request("delete", { id: alertId });
+
+    return res.status === "ALERT_DELETE_SUCCESS";
+  }
+
+  async list() {
+    validateConnected(this.#ctx.connected);
+
+    const res = await this.#request("list", {});
+    const alerts = res.data || [];
+
+    // Track metadata for all listed alerts
+    for (const a of alerts) {
+      if (a.id) {
+        this.#alertMetadata.set(a.id, { type: a.type || "THRESHOLD" });
+      }
     }
 
-    async updateEphemeral(config) {
-        validateConnected(this.#ctx.connected);
+    return alerts;
+  }
 
-        if (!config.id) throw new Error('id is required');
+  async get(alertName) {
+    validateConnected(this.#ctx.connected);
+    validateIdent(alertName, "alertName");
 
-        if (config.config?.recovery_eval_type !== undefined && !['VALUE', 'TIMER'].includes(config.config.recovery_eval_type)) {
-            throw new Error('config.recovery_eval_type must be "VALUE" or "TIMER"');
-        }
+    const res = await this.#request("get", { name: alertName });
 
-        const res = await this.#request('update_ephemeral', {
-            ...config,
-            type: 'EPHEMERAL',
-            env: this.#ctx.env,
-        });
+    if (!res.data) return null;
 
-        if (res.data) return this.#wrapEphemeralAlert(res.data);
-        return null;
+    // Track metadata
+    if (res.data.id) {
+      this.#alertMetadata.set(res.data.id, {
+        type: res.data.type || "THRESHOLD",
+      });
     }
 
-    async delete(alertId) {
-        validateConnected(this.#ctx.connected);
-
-        if (!alertId) throw new Error('id is required');
-
-        // Clean up engine if exists
-        const engine = this.#ephemeralEngines.get(alertId);
-        if (engine) {
-            await engine.stop();
-            this.#ephemeralEngines.delete(alertId);
-        }
-        this.#alertMetadata.delete(alertId);
-
-        const res = await this.#request('delete', { id: alertId });
-
-        return res.status === 'ALERT_DELETE_SUCCESS';
+    // Return correct wrapper based on type
+    if (res.data.type === "EPHEMERAL") {
+      return this.#wrapEphemeralAlert(res.data);
     }
 
-    async list() {
-        validateConnected(this.#ctx.connected);
+    return this.#wrapAlert(res.data);
+  }
 
-        const res = await this.#request('list', {});
-        const alerts = res.data || [];
+  // ─── History ──────────────────────────────────────────────
 
-        // Track metadata for all listed alerts
-        for (const a of alerts) {
-            if (a.id) {
-                this.#alertMetadata.set(a.id, { type: a.type || 'THRESHOLD' });
-            }
-        }
+  async history(params) {
+    validateConnected(this.#ctx.connected);
 
-        return alerts;
+    if (!params.rule_type) throw new Error("rule_type is required");
+
+    if (!VALID_RULE_TYPES.includes(params.rule_type)) {
+      throw new Error("rule_type must be DEVICE or RULE");
     }
 
-    async get(alertName) {
-        validateConnected(this.#ctx.connected);
-        validateIdent(alertName, 'alertName');
-
-        const res = await this.#request('get', { name: alertName });
-
-        if (!res.data) return null;
-
-        // Track metadata
-        if (res.data.id) {
-            this.#alertMetadata.set(res.data.id, { type: res.data.type || 'THRESHOLD' });
-        }
-
-        // Return correct wrapper based on type
-        if (res.data.type === 'EPHEMERAL') {
-            return this.#wrapEphemeralAlert(res.data);
-        }
-
-        return this.#wrapAlert(res.data);
+    if (params.rule_type === "DEVICE") {
+      if (!params.device_ident)
+        throw new Error("device_ident is required for rule_type DEVICE");
     }
 
-    // ─── History ──────────────────────────────────────────────
-
-    async history(params) {
-        validateConnected(this.#ctx.connected);
-
-        if (!params.rule_type) throw new Error('rule_type is required');
-
-        if (!VALID_RULE_TYPES.includes(params.rule_type)) {
-            throw new Error('rule_type must be DEVICE or RULE');
-        }
-
-        if (params.rule_type === 'DEVICE') {
-            if (!params.device_ident) throw new Error('device_ident is required for rule_type DEVICE');
-        }
-
-        if (params.rule_type === 'RULE') {
-            if (!params.rule_id) throw new Error('rule_id is required for rule_type RULE');
-        }
-
-        validateNonEmptyArray(params.rule_states, 'rule_states');
-
-        const invalidStates = params.rule_states.filter(s => !VALID_RULE_STATES.includes(s));
-
-        if (invalidStates.length > 0) {
-            throw new Error(`rule_states contains invalid values: ${invalidStates.join(', ')}. Valid values: ${VALID_RULE_STATES.join(', ')}`);
-        }
-
-        // ack and ack_all require rule_id
-        const needsRuleId = params.rule_states.some(s => s === 'ack' || s === 'ack_all');
-
-        if (needsRuleId && !params.rule_id) {
-            throw new Error('rule_id is required when rule_states includes ack or ack_all');
-        }
-
-        validateISO8601(params.start, 'start');
-        validateISO8601(params.end, 'end');
-        validateStartBeforeEnd(params.start, params.end);
-
-        const payload = {
-            rule_type: params.rule_type,
-            env: this.#ctx.env,
-            rule_states: params.rule_states,
-            start: params.start,
-            end: params.end,
-        };
-
-        // Resolve device_ident to device_id
-        if (params.device_ident) {
-            payload.device_id = await this.#ctx.device.resolveDeviceId(params.device_ident);
-        }
-
-        if (params.rule_type === 'RULE') {
-            payload.rule_id = params.rule_id;
-        }
-
-        const res = await this.#ctx.natsClient.request(
-            `api.iot.db.${this.#ctx.orgID}.alerts.history`,
-            this.#codec.encode(payload),
-            { timeout: 20000 }
-        );
-
-        const decoded = msgpackDecode(res.data)
-
-        if (decoded.status === 'ALERT_FETCH_SUCCESS') {
-            return decoded.data;
-        }
-
-        return decoded;
+    if (params.rule_type === "RULE") {
+      if (!params.rule_id)
+        throw new Error("rule_id is required for rule_type RULE");
     }
 
-    // ─── Ack / AckAll ────────────────────────────────────────
+    validateNonEmptyArray(params.rule_states, "rule_states");
 
-    async ack(params) {
-        validateConnected(this.#ctx.connected);
+    const invalidStates = params.rule_states.filter(
+      (s) => !VALID_RULE_STATES.includes(s),
+    );
 
-        if (!params.device_id) throw new Error('device_id is required');
-        if (!params.alert_id) throw new Error('alert_id is required');
-        if (!params.acked_by) throw new Error('acked_by is required');
+    if (invalidStates.length > 0) {
+      throw new Error(
+        `rule_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_RULE_STATES.join(", ")}`,
+      );
+    }
 
-        // Check if ephemeral with local owner engine
-        const engine = this.#ephemeralEngines.get(params.alert_id);
-        if (engine && engine.mode === 'owner') {
-            return engine.ack(params.acked_by, params.ack_notes);
-        }
+    // ack and ack_all require rule_id
+    const needsRuleId = params.rule_states.some(
+      (s) => s === "ack" || s === "ack_all",
+    );
 
-        // Check if ephemeral without local engine — RPC to owner
-        const meta = this.#alertMetadata.get(params.alert_id);
-        if (meta?.type === 'EPHEMERAL') {
-            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack`;
+    if (needsRuleId && !params.rule_id) {
+      throw new Error(
+        "rule_id is required when rule_states includes ack or ack_all",
+      );
+    }
 
-            const res = await this.#ctx.natsClient.request(
-                subject,
-                msgpackEncode({
-                    status: "acknowledged",
-                    device_id: params.device_id,
-                    ack: {
-                        acked_by: params.acked_by,
-                        ack_notes: params.ack_notes,
-                        acked_at: Date.now()
-                    }
-                }),
-                { timeout: 10000 }
-            );
+    validateISO8601(params.start, "start");
+    validateISO8601(params.end, "end");
+    validateStartBeforeEnd(params.start, params.end);
 
-            const data = res.json();
-            return data.status === 'ACK_SUCCESS';
-        }
+    const payload = {
+      rule_type: params.rule_type,
+      env: this.#ctx.env,
+      rule_states: params.rule_states,
+      start: params.start,
+      end: params.end,
+    };
 
-        // Non-ephemeral — backend
-        const res = await this.#request('ack', {
-            device_id: params.device_id,
-            rule_id: params.alert_id,
+    // Resolve device_ident to device_id
+    if (params.device_ident) {
+      payload.device_id = await this.#ctx.device.resolveDeviceId(
+        params.device_ident,
+      );
+    }
+
+    if (params.rule_type === "RULE") {
+      payload.rule_id = params.rule_id;
+    }
+
+    const res = await this.#ctx.natsClient.request(
+      `api.iot.db.${this.#ctx.orgID}.alerts.history`,
+      this.#codec.encode(payload),
+      { timeout: 20000 },
+    );
+
+    const decoded = msgpackDecode(res.data);
+
+    if (decoded.status === "ALERT_FETCH_SUCCESS") {
+      return decoded.data;
+    }
+
+    return decoded;
+  }
+
+  // ─── Ack / AckAll ────────────────────────────────────────
+
+  async ack(params) {
+    validateConnected(this.#ctx.connected);
+
+    if (!params.device_id) throw new Error("device_id is required");
+    if (!params.alert_id) throw new Error("alert_id is required");
+    if (!params.acked_by) throw new Error("acked_by is required");
+
+    // Check if ephemeral with local owner engine
+    const engine = this.#ephemeralEngines.get(params.alert_id);
+    if (engine && engine.mode === "owner") {
+      return engine.ack(params.acked_by, params.ack_notes);
+    }
+
+    // Check if ephemeral without local engine — RPC to owner
+    const meta = this.#alertMetadata.get(params.alert_id);
+    if (meta?.type === "EPHEMERAL") {
+      const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack`;
+
+      const res = await this.#ctx.natsClient.request(
+        subject,
+        msgpackEncode({
+          status: "acknowledged",
+          device_id: params.device_id,
+          ack: {
             acked_by: params.acked_by,
-            env: this.#ctx.env,
             ack_notes: params.ack_notes,
-        });
+            acked_at: Date.now(),
+          },
+        }),
+        { timeout: 10000 },
+      );
 
-        return res.status === 'ALERT_ACK_SUCCESS';
+      const data = res.json();
+      return data.status === "ACK_SUCCESS";
     }
 
-    async ackAll(params) {
-        validateConnected(this.#ctx.connected);
+    // Non-ephemeral — backend
+    const res = await this.#request("ack", {
+      device_id: params.device_id,
+      rule_id: params.alert_id,
+      acked_by: params.acked_by,
+      env: this.#ctx.env,
+      ack_notes: params.ack_notes,
+    });
 
-        if (!params.alert_id) throw new Error('alert_id is required');
-        if (!params.acked_by) throw new Error('acked_by is required');
+    return res.status === "ALERT_ACK_SUCCESS";
+  }
 
-        const engine = this.#ephemeralEngines.get(params.alert_id);
-        if (engine && engine.mode === 'owner') {
-            return engine.ackAll(params.acked_by, params.ack_notes);
-        }
+  async ackAll(params) {
+    validateConnected(this.#ctx.connected);
 
-        const meta = this.#alertMetadata.get(params.alert_id);
-        if (meta?.type === 'EPHEMERAL') {
-            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack_all`;
+    if (!params.alert_id) throw new Error("alert_id is required");
+    if (!params.acked_by) throw new Error("acked_by is required");
 
-            const res = await this.#ctx.natsClient.request(
-                subject,
-                msgpackEncode({
-                    status: "acknowledged",
-                    ack: {
-                        acked_by: params.acked_by,
-                        ack_notes: params.ack_notes,
-                        acked_at: Date.now()
-                    }
-                }),
-                { timeout: 10000 }
-            );
+    const engine = this.#ephemeralEngines.get(params.alert_id);
+    if (engine && engine.mode === "owner") {
+      return engine.ackAll(params.acked_by, params.ack_notes);
+    }
 
-            const data = res.json();
-            return data.status === 'ACK_SUCCESS';
-        }
+    const meta = this.#alertMetadata.get(params.alert_id);
+    if (meta?.type === "EPHEMERAL") {
+      const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack_all`;
 
-        const res = await this.#request('ack_all', {
-            rule_id: params.alert_id,
+      const res = await this.#ctx.natsClient.request(
+        subject,
+        msgpackEncode({
+          status: "acknowledged",
+          ack: {
             acked_by: params.acked_by,
-            env: this.#ctx.env,
             ack_notes: params.ack_notes,
-        });
+            acked_at: Date.now(),
+          },
+        }),
+        { timeout: 10000 },
+      );
 
-        return res.status === 'ALERT_ACK_SUCCESS';
+      const data = res.json();
+      return data.status === "ACK_SUCCESS";
     }
 
-    // ─── Mute / Unmute ───────────────────────────────────────
+    const res = await this.#request("ack_all", {
+      rule_id: params.alert_id,
+      acked_by: params.acked_by,
+      env: this.#ctx.env,
+      ack_notes: params.ack_notes,
+    });
 
-    async mute(params) {
-        validateConnected(this.#ctx.connected);
+    return res.status === "ALERT_ACK_SUCCESS";
+  }
 
-        if (!params.id) throw new Error('id is required');
-        if (!params.mute_config) throw new Error('mute_config is required');
+  // ─── Mute / Unmute ───────────────────────────────────────
 
-        if (!['FOREVER', 'TIME_BASED'].includes(params.mute_config.type)) {
-            throw new Error('mute_config.type must be FOREVER or TIME_BASED');
-        }
+  async mute(params) {
+    validateConnected(this.#ctx.connected);
 
-        if (params.mute_config.type === 'TIME_BASED' && !params.mute_config.mute_till) {
-            throw new Error('mute_till is required for TIME_BASED mute');
-        }
+    if (!params.id) throw new Error("id is required");
+    if (!params.mute_config) throw new Error("mute_config is required");
 
-        // Ephemeral — RPC to owner (single 'mute' endpoint handles both mute/unmute)
-        const meta = this.#alertMetadata.get(params.id);
-        if (meta?.type === 'EPHEMERAL') {
-            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.id}.mute`;
-
-            const res = await this.#ctx.natsClient.request(
-                subject,
-                msgpackEncode({ mute_config: params.mute_config }),
-                { timeout: 10000 }
-            );
-
-            return res.json();
-        }
-
-        const payload = {
-            rule_id: params.id,
-            type: params.mute_config.type,
-        };
-
-        if (params.mute_config.type === 'TIME_BASED') {
-            payload.mute_till = params.mute_config.mute_till;
-        }
-
-        return this.#request('mute', payload);
+    if (!["FOREVER", "TIME_BASED"].includes(params.mute_config.type)) {
+      throw new Error("mute_config.type must be FOREVER or TIME_BASED");
     }
 
-    async unmute(id) {
-        validateConnected(this.#ctx.connected);
-
-        if (!id) throw new Error('id is required');
-
-        // Ephemeral — RPC to owner via same 'mute' endpoint with type=CLEAR
-        const meta = this.#alertMetadata.get(id);
-        if (meta?.type === 'EPHEMERAL') {
-            const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${id}.mute`;
-
-            const res = await this.#ctx.natsClient.request(
-                subject,
-                msgpackEncode({ mute_config: { type: 'CLEAR' } }),
-                { timeout: 10000 }
-            );
-
-            return res.json();
-        }
-
-        return this.#request('mute', { rule_id: id, type: 'CLEAR' });
+    if (
+      params.mute_config.type === "TIME_BASED" &&
+      !params.mute_config.mute_till
+    ) {
+      throw new Error("mute_till is required for TIME_BASED mute");
     }
 
-    // ─── Listen (non-ephemeral) ──────────────────────────────
+    // Ephemeral — RPC to owner (single 'mute' endpoint handles both mute/unmute)
+    const meta = this.#alertMetadata.get(params.id);
+    if (meta?.type === "EPHEMERAL") {
+      const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.id}.mute`;
 
-    async #listen(rule, callbacks) {
-        validateConnected(this.#ctx.connected);
+      const res = await this.#ctx.natsClient.request(
+        subject,
+        msgpackEncode({ mute_config: params.mute_config }),
+        { timeout: 10000 },
+      );
 
-        const ruleId = rule.id;
-        const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${ruleId}.*`;
-
-        const callbackMap = {
-            fire: callbacks.onFire,
-            resolved: callbacks.onResolved,
-            ack: callbacks.onAck,
-            ack_all: callbacks.onAckAll,
-        };
-
-        const consumer = await this.#ctx.jetstream.consumers.get(
-            `${this.#ctx.orgID}_stream`,
-            {
-                name: `appjs_alert_listen_${ruleId}_${crypto.randomUUID()}`,
-                filter_subjects: subject,
-                replay_policy: 'instant',
-                opt_start_time: new Date(),
-                ack_policy: 'explicit',
-                delivery_policy: 'new',
-            }
-        );
-
-        await consumer.consume({
-            callback: async (msg) => {
-                msg.working();
-                const data = msgpackDecode(msg.data);
-                msg.ack();
-
-                const tokens = msg.subject.split('.');
-                const eventType = tokens[tokens.length - 1];
-                const cb = callbackMap[eventType];
-
-                if (cb) cb(this.#transformTimestamp(data));
-            },
-        });
-
-        this.#listenConsumers.set(ruleId, [consumer]);
+      return res.json();
     }
 
-    #transformTimestamp(data) {
-        const transformed = { ...data };
+    const payload = {
+      rule_id: params.id,
+      type: params.mute_config.type,
+    };
 
-        if (typeof transformed.timestamp === 'number') {
-            transformed.timestamp = new Date(transformed.timestamp).toISOString();
-        }
-
-        return transformed;
+    if (params.mute_config.type === "TIME_BASED") {
+      payload.mute_till = params.mute_config.mute_till;
     }
 
-    // ─── Cleanup ─────────────────────────────────────────────
+    return this.#request("mute", payload);
+  }
 
-    async deleteAllConsumers() {
-        for (const [, consumers] of this.#listenConsumers) {
-            for (const consumer of consumers) {
-                await consumer.delete();
-            }
-        }
-        this.#listenConsumers.clear();
+  async unmute(id) {
+    validateConnected(this.#ctx.connected);
 
-        for (const [, engine] of this.#ephemeralEngines) {
-            await engine.stop();
-        }
-        this.#ephemeralEngines.clear();
+    if (!id) throw new Error("id is required");
+
+    // Ephemeral — RPC to owner via same 'mute' endpoint with type=CLEAR
+    const meta = this.#alertMetadata.get(id);
+    if (meta?.type === "EPHEMERAL") {
+      const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${id}.mute`;
+
+      const res = await this.#ctx.natsClient.request(
+        subject,
+        msgpackEncode({ mute_config: { type: "CLEAR" } }),
+        { timeout: 10000 },
+      );
+
+      return res.json();
     }
+
+    return this.#request("mute", { rule_id: id, type: "CLEAR" });
+  }
+
+  // ─── Listen (non-ephemeral) ──────────────────────────────
+
+  async #listen(rule, callbacks) {
+    validateConnected(this.#ctx.connected);
+
+    const ruleId = rule.id;
+    const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.alerts.listen.${ruleId}.*`;
+
+    const callbackMap = {
+      fire: callbacks.onFire,
+      resolved: callbacks.onResolved,
+      ack: callbacks.onAck,
+      ack_all: callbacks.onAckAll,
+    };
+
+    const consumer = await this.#ctx.jetstream.consumers.get(
+      `${this.#ctx.orgID}_stream`,
+      {
+        name: `appjs_alert_listen_${ruleId}_${crypto.randomUUID()}`,
+        filter_subjects: subject,
+        replay_policy: "instant",
+        opt_start_time: new Date(),
+        ack_policy: "explicit",
+        delivery_policy: "new",
+      },
+    );
+
+    await consumer.consume({
+      callback: async (msg) => {
+        msg.working();
+        const data = msgpackDecode(msg.data);
+        msg.ack();
+
+        const tokens = msg.subject.split(".");
+        const eventType = tokens[tokens.length - 1];
+        const cb = callbackMap[eventType];
+
+        if (cb) cb(this.#transformTimestamp(data));
+      },
+    });
+
+    this.#listenConsumers.set(ruleId, [consumer]);
+  }
+
+  #transformTimestamp(data) {
+    const transformed = { ...data };
+
+    if (typeof transformed.timestamp === "number") {
+      transformed.timestamp = new Date(transformed.timestamp).toISOString();
+    }
+
+    return transformed;
+  }
+
+  // ─── Cleanup ─────────────────────────────────────────────
+
+  async deleteAllConsumers() {
+    for (const [, consumers] of this.#listenConsumers) {
+      for (const consumer of consumers) {
+        await consumer.delete();
+      }
+    }
+    this.#listenConsumers.clear();
+
+    for (const [, engine] of this.#ephemeralEngines) {
+      await engine.stop();
+    }
+    this.#ephemeralEngines.clear();
+  }
 }

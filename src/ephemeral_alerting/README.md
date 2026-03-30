@@ -52,12 +52,12 @@ Client-side alert engine for the RelayX AppSDK. Evaluates breach conditions loca
 
 The engine is split into four files:
 
-| File | Responsibility |
-|------|----------------|
-| `index.js` | Orchestrator. Routes to owner or listener based on whether an evaluator is set. |
-| `owner.js` | Subscribes to data, runs evaluator, drives state machine, handles RPCs, manages KV lock. |
-| `listener.js` | Subscribes to alert event stream, routes fire/resolved/ack/ack_all to callbacks. |
-| `shared.js` | Subject maps, index constants, codec, payload builders, mute check, notification dispatch. |
+| File          | Responsibility                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| `index.js`    | Orchestrator. Routes to owner or listener based on whether an evaluator is set.            |
+| `owner.js`    | Subscribes to data, runs evaluator, drives state machine, handles RPCs, manages KV lock.   |
+| `listener.js` | Subscribes to alert event stream, routes fire/resolved/ack/ack_all to callbacks.           |
+| `shared.js`   | Subject maps, index constants, codec, payload builders, mute check, notification dispatch. |
 
 ---
 
@@ -164,11 +164,11 @@ The ephemeral alerting engine uses four categories of NATS topics. Understanding
 
 These are the raw IoT data streams the owner subscribes to. The `config.topic` object in the alert rule determines which subject is built.
 
-| Source | Subject Pattern | Example |
-|--------|----------------|---------|
-| TELEMETRY | `{orgID}.{env}.telemetry.{device_id}.{metric}` | `abc123.test.telemetry.dev456.temperature` |
-| COMMAND | `{orgID}.{env}.command.queue.{device_id}.{command}` | `abc123.test.command.queue.dev456.reboot` |
-| EVENT | `{orgID}.{env}.events.{device_id}.{event}` | `abc123.test.events.dev456.door_opened` |
+| Source    | Subject Pattern                                     | Example                                    |
+| --------- | --------------------------------------------------- | ------------------------------------------ |
+| TELEMETRY | `{orgID}.{env}.telemetry.{device_id}.{metric}`      | `abc123.test.telemetry.dev456.temperature` |
+| COMMAND   | `{orgID}.{env}.command.queue.{device_id}.{command}` | `abc123.test.command.queue.dev456.reboot`  |
+| EVENT     | `{orgID}.{env}.events.{device_id}.{event}`          | `abc123.test.events.dev456.door_opened`    |
 
 **Wildcards:**
 
@@ -182,9 +182,12 @@ Both can be combined: `device_ident: '*', last_token: '*'` subscribes to every m
 ```js
 // shared.js
 const SUBJECT_MAP = {
-    TELEMETRY: (orgID, env, deviceId, lastToken) => `${orgID}.${env}.telemetry.${deviceId}.${lastToken}`,
-    COMMAND:   (orgID, env, deviceId, lastToken) => `${orgID}.${env}.command.queue.${deviceId}.${lastToken}`,
-    EVENT:     (orgID, env, deviceId, lastToken) => `${orgID}.${env}.events.${deviceId}.${lastToken}`,
+  TELEMETRY: (orgID, env, deviceId, lastToken) =>
+    `${orgID}.${env}.telemetry.${deviceId}.${lastToken}`,
+  COMMAND: (orgID, env, deviceId, lastToken) =>
+    `${orgID}.${env}.command.queue.${deviceId}.${lastToken}`,
+  EVENT: (orgID, env, deviceId, lastToken) =>
+    `${orgID}.${env}.events.${deviceId}.${lastToken}`,
 };
 ```
 
@@ -209,11 +212,11 @@ The consumer is created on the stream `{orgID}_stream`. This stream must have su
 
 When a data message arrives, the engine extracts `device_id` and `last_token` (metric/command/event name) by position in the subject:
 
-| Source | Subject Tokens | device_id index | last_token index |
-|--------|---------------|-----------------|-----------------|
-| TELEMETRY | `orgID.env.telemetry.deviceId.metric` | 3 | 4 |
-| COMMAND | `orgID.env.command.queue.deviceId.cmd` | 4 | 5 |
-| EVENT | `orgID.env.events.deviceId.event` | 3 | 4 |
+| Source    | Subject Tokens                         | device_id index | last_token index |
+| --------- | -------------------------------------- | --------------- | ---------------- |
+| TELEMETRY | `orgID.env.telemetry.deviceId.metric`  | 3               | 4                |
+| COMMAND   | `orgID.env.command.queue.deviceId.cmd` | 4               | 5                |
+| EVENT     | `orgID.env.events.deviceId.event`      | 3               | 4                |
 
 These indices are defined in `SUBJECT_DEVICE_INDEX` and `SUBJECT_LAST_TOKEN_INDEX` in `shared.js`.
 
@@ -226,18 +229,19 @@ These indices are defined in `SUBJECT_DEVICE_INDEX` and `SUBJECT_LAST_TOKEN_INDE
 When the owner's state machine fires, resolves, or processes an ack, it publishes an event to a well-known subject. Listeners subscribe to these via a wildcard JetStream consumer.
 
 **Subject pattern:**
+
 ```
 {orgID}.{env}.alerts.listen.{rule_id}.{event_type}
 ```
 
 **Event types:**
 
-| Event Type | Published When | Publisher |
-|------------|---------------|-----------|
-| `fire` | Breach held >= duration (or re-fire after cooldown) | Owner state machine |
-| `resolved` | Clear held >= recovery_duration | Owner state machine |
-| `ack` | Single-device ack received (via RPC or local call) | Owner RPC handler / `ack()` method |
-| `ack_all` | All-device ack received (via RPC or local call) | Owner RPC handler / `ackAll()` method |
+| Event Type | Published When                                      | Publisher                             |
+| ---------- | --------------------------------------------------- | ------------------------------------- |
+| `fire`     | Breach held >= duration (or re-fire after cooldown) | Owner state machine                   |
+| `resolved` | Clear held >= recovery_duration                     | Owner state machine                   |
+| `ack`      | Single-device ack received (via RPC or local call)  | Owner RPC handler / `ack()` method    |
+| `ack_all`  | All-device ack received (via RPC or local call)     | Owner RPC handler / `ackAll()` method |
 
 **Listener's consumer configuration:**
 
@@ -255,7 +259,12 @@ When the owner's state machine fires, resolves, or processes an ack, it publishe
 The listener routes each message to the correct callback by extracting the last token from the subject and mapping it:
 
 ```js
-const callbackMap = { fire: 'onFire', resolved: 'onResolved', ack: 'onAck', ack_all: 'onAckAll' };
+const callbackMap = {
+  fire: "onFire",
+  resolved: "onResolved",
+  ack: "onAck",
+  ack_all: "onAckAll",
+};
 ```
 
 For `fire` and `resolved` events, the listener converts the numeric `timestamp` field to an ISO string before calling the callback.
@@ -269,17 +278,18 @@ For `fire` and `resolved` events, the listener converts the numeric `timestamp` 
 Listeners send ack/ackAll/mute commands to the owner via NATS request/reply. The owner subscribes to a wildcard subject and routes by last token.
 
 **Subject pattern:**
+
 ```
 {orgID}.{env}.alerts.custom.{rule_id}.*
 ```
 
 **RPC routes:**
 
-| Last Token | Purpose | Request Body | Response Body |
-|------------|---------|-------------|---------------|
-| `ack` | Acknowledge for a specific device | `{ device_id, acked_by, ack_notes }` | `{ status: 'ACK_SUCCESS' }` or `{ status: 'ACK_FAILED', reason }` |
-| `ack_all` | Acknowledge for all devices | `{ acked_by, ack_notes }` | `{ status: 'ACK_SUCCESS' }` or `{ status: 'ACK_FAILED', reason }` |
-| `mute` | Mute or unmute the alert | `{ mute_config: { type, mute_till? } }` | `{ status: 'MUTE_SUCCESS' }` |
+| Last Token | Purpose                           | Request Body                            | Response Body                                                     |
+| ---------- | --------------------------------- | --------------------------------------- | ----------------------------------------------------------------- |
+| `ack`      | Acknowledge for a specific device | `{ device_id, acked_by, ack_notes }`    | `{ status: 'ACK_SUCCESS' }` or `{ status: 'ACK_FAILED', reason }` |
+| `ack_all`  | Acknowledge for all devices       | `{ acked_by, ack_notes }`               | `{ status: 'ACK_SUCCESS' }` or `{ status: 'ACK_FAILED', reason }` |
+| `mute`     | Mute or unmute the alert          | `{ mute_config: { type, mute_till? } }` | `{ status: 'MUTE_SUCCESS' }`                                      |
 
 **Important:** These are **not** JetStream consumers. They use plain `natsClient.subscribe()` for low-latency request/reply.
 
@@ -291,11 +301,11 @@ Listeners send ack/ackAll/mute commands to the owner via NATS request/reply. The
 
 These subjects target backend microservices via NATS request/reply (not JetStream).
 
-| Purpose | Subject | Encoding | Timeout |
-|---------|---------|----------|---------|
-| Create ephemeral alert | `api.iot.alerts.{orgID}.create_ephemeral` | JSON | 10s |
-| Sync mute config | `api.iot.alerts.{orgID}.mute` | JSON | 10s |
-| Dispatch notifications | `api.iot.notification.{orgID}.dispatch` | JSON | 10s |
+| Purpose                | Subject                                   | Encoding | Timeout |
+| ---------------------- | ----------------------------------------- | -------- | ------- |
+| Create ephemeral alert | `api.iot.alerts.{orgID}.create_ephemeral` | JSON     | 10s     |
+| Sync mute config       | `api.iot.alerts.{orgID}.mute`             | JSON     | 10s     |
+| Dispatch notifications | `api.iot.notification.{orgID}.dispatch`   | JSON     | 10s     |
 
 The mute sync and notification dispatch are fire-and-forget — failures are swallowed and do not block the alerting pipeline.
 
@@ -303,13 +313,13 @@ The mute sync and notification dispatch are fire-and-forget — failures are swa
 
 ### Encoding Summary
 
-| Context | Encoding | Encode | Decode |
-|---------|----------|--------|--------|
-| Data topic messages | msgpack | (device/backend) | `msgpackDecode(msg.data)` |
-| Alert event publishes | msgpack | `msgpackEncode(payload)` | `msgpackDecode(msg.data)` |
-| RPC requests (ack/ackAll/mute) | msgpack | `msgpackEncode(payload)` | `msgpackDecode(msg.data)` |
-| RPC responses | JSON | `JSONCodec().encode(obj)` | (requester decodes) |
-| Backend request/reply | JSON | `JSONCodec().encode(obj)` | `JSONCodec().decode(msg.data)` |
+| Context                        | Encoding | Encode                    | Decode                         |
+| ------------------------------ | -------- | ------------------------- | ------------------------------ |
+| Data topic messages            | msgpack  | (device/backend)          | `msgpackDecode(msg.data)`      |
+| Alert event publishes          | msgpack  | `msgpackEncode(payload)`  | `msgpackDecode(msg.data)`      |
+| RPC requests (ack/ackAll/mute) | msgpack  | `msgpackEncode(payload)`  | `msgpackDecode(msg.data)`      |
+| RPC responses                  | JSON     | `JSONCodec().encode(obj)` | (requester decodes)            |
+| Backend request/reply          | JSON     | `JSONCodec().encode(obj)` | `JSONCodec().decode(msg.data)` |
 
 ---
 
@@ -365,6 +375,7 @@ The owner accumulates a rolling state object from incoming data. It is keyed by 
 ### Shape by Source Type
 
 **TELEMETRY:**
+
 ```js
 {
   "sensor-01": {
@@ -378,6 +389,7 @@ The owner accumulates a rolling state object from incoming data. It is keyed by 
 ```
 
 **COMMAND:**
+
 ```js
 {
   "sensor-01": {
@@ -387,6 +399,7 @@ The owner accumulates a rolling state object from incoming data. It is keyed by 
 ```
 
 **EVENT:**
+
 ```js
 {
   "sensor-01": {
@@ -415,10 +428,10 @@ Using `last_token: "*"` in the alert config subscribes to all metrics for a devi
 
 ### States
 
-| State | Meaning |
-|-------|---------|
-| `normal` | No active breach. Baseline state. |
-| `alerting` | Breach held long enough to fire. May re-fire on cooldown. |
+| State          | Meaning                                                        |
+| -------------- | -------------------------------------------------------------- |
+| `normal`       | No active breach. Baseline state.                              |
+| `alerting`     | Breach held long enough to fire. May re-fire on cooldown.      |
 | `acknowledged` | Operator acknowledged the alert. Stays until clear + recovery. |
 
 ### Transition Table
@@ -477,11 +490,11 @@ Using `last_token: "*"` in the alert config subscribes to all metrics for a devi
 
 All three are specified in the alert config in **seconds** and converted to milliseconds internally.
 
-| Parameter | Config Key | Purpose |
-|-----------|-----------|---------|
-| **Duration** | `config.duration` | How long (seconds) the evaluator must continuously return `true` before the first FIRE. |
-| **Recovery** | `config.recovery_duration` | How long (seconds) the evaluator must continuously return `false` before RESOLVED. |
-| **Cooldown** | `config.cooldown` | Minimum gap (seconds) between re-fires while still in `alerting` state. |
+| Parameter    | Config Key                 | Purpose                                                                                 |
+| ------------ | -------------------------- | --------------------------------------------------------------------------------------- |
+| **Duration** | `config.duration`          | How long (seconds) the evaluator must continuously return `true` before the first FIRE. |
+| **Recovery** | `config.recovery_duration` | How long (seconds) the evaluator must continuously return `false` before RESOLVED.      |
+| **Cooldown** | `config.cooldown`          | Minimum gap (seconds) between re-fires while still in `alerting` state.                 |
 
 ### Staleness Check
 
@@ -493,12 +506,12 @@ If the gap between the current evaluation and `last_evaluated_at` exceeds `durat
 
 Only one owner can run per alert rule across all SDK instances. This is enforced via a NATS KV entry.
 
-| Property | Value |
-|----------|-------|
-| **Bucket** | `{orgID}` (shared org bucket) |
-| **Key** | `ephemeral_owner_{rule_id}` |
-| **Value** | `{ "started_at": <unix_ms>, "expires_at": <unix_ms> }` |
-| **TTL** | 30 seconds (stored in `expires_at`, not bucket-level) |
+| Property      | Value                                                   |
+| ------------- | ------------------------------------------------------- |
+| **Bucket**    | `{orgID}` (shared org bucket)                           |
+| **Key**       | `ephemeral_owner_{rule_id}`                             |
+| **Value**     | `{ "started_at": <unix_ms>, "expires_at": <unix_ms> }`  |
+| **TTL**       | 30 seconds (stored in `expires_at`, not bucket-level)   |
 | **Heartbeat** | Every 15 seconds, refreshes `expires_at` to `now + 30s` |
 
 ### Acquisition Flow
@@ -534,11 +547,11 @@ The owner subscribes to a single wildcard NATS subject for incoming RPCs from li
 
 Routing is by last token:
 
-| Last Token | Handler | Description |
-|------------|---------|-------------|
-| `ack` | `handleAckRPC` | Acknowledge alert for a specific device. |
-| `ack_all` | `handleAckAllRPC` | Acknowledge alert for all devices. |
-| `mute` | `handleMuteRPC` | Mute or unmute the alert. |
+| Last Token | Handler           | Description                              |
+| ---------- | ----------------- | ---------------------------------------- |
+| `ack`      | `handleAckRPC`    | Acknowledge alert for a specific device. |
+| `ack_all`  | `handleAckAllRPC` | Acknowledge alert for all devices.       |
+| `mute`     | `handleMuteRPC`   | Mute or unmute the alert.                |
 
 ### RPC Flow (ack/ack_all)
 
@@ -563,11 +576,11 @@ Routing is by last token:
 
 Mute is checked at the start of every evaluation cycle. If muted, the entire cycle is skipped — no state changes, no callbacks.
 
-| Mute Type | Behavior |
-|-----------|----------|
-| `FOREVER` | Always skip evaluation. |
-| `TIME_BASED` | Skip if `Date.now() < mute_till`. |
-| `CLEAR` / `null` | Not muted. Evaluate normally. |
+| Mute Type        | Behavior                          |
+| ---------------- | --------------------------------- |
+| `FOREVER`        | Always skip evaluation.           |
+| `TIME_BASED`     | Skip if `Date.now() < mute_till`. |
+| `CLEAR` / `null` | Not muted. Evaluate normally.     |
 
 Mute state lives on `rule.alert_mute_config` and is synced to the backend asynchronously. Sync failures do not block the local mute operation.
 
@@ -577,13 +590,13 @@ Mute state lives on `rule.alert_mute_config` and is synced to the backend asynch
 
 Passed to `listen(callbacks)`:
 
-| Callback | Mode | Trigger |
-|----------|------|---------|
-| `onFire(data)` | Owner & Listener | Alert breached for >= duration |
-| `onResolved(data)` | Owner & Listener | Alert cleared for >= recovery_duration |
-| `onAck(data)` | Owner & Listener | Single-device acknowledgement |
-| `onAckAll(data)` | Owner & Listener | All-device acknowledgement |
-| `onError(err)` | Owner only | Evaluator threw or returned non-boolean |
+| Callback           | Mode             | Trigger                                 |
+| ------------------ | ---------------- | --------------------------------------- |
+| `onFire(data)`     | Owner & Listener | Alert breached for >= duration          |
+| `onResolved(data)` | Owner & Listener | Alert cleared for >= recovery_duration  |
+| `onAck(data)`      | Owner & Listener | Single-device acknowledgement           |
+| `onAckAll(data)`   | Owner & Listener | All-device acknowledgement              |
+| `onError(err)`     | Owner only       | Evaluator threw or returned non-boolean |
 
 All callbacks are optional. Missing callbacks are silently skipped.
 
@@ -641,14 +654,14 @@ All callbacks are optional. Missing callbacks are silently skipped.
 
 ## Error Handling
 
-| Scenario | Behavior |
-|----------|----------|
-| Evaluator throws an exception | Caught. `onError(err)` called. State unchanged. Engine continues. |
+| Scenario                      | Behavior                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------- |
+| Evaluator throws an exception | Caught. `onError(err)` called. State unchanged. Engine continues.                     |
 | Evaluator returns non-boolean | `onError(new Error("Evaluator must return a boolean, got <type>"))`. State unchanged. |
-| Notification dispatch fails | Swallowed. Does not block fire/resolve. |
-| Mute backend sync fails | Swallowed. Local mute still applies. |
-| KV lock heartbeat fails | Swallowed. Lock may be stolen by another instance. |
-| KV unavailable | Lock skipped entirely. Engine proceeds without single-owner guarantee. |
+| Notification dispatch fails   | Swallowed. Does not block fire/resolve.                                               |
+| Mute backend sync fails       | Swallowed. Local mute still applies.                                                  |
+| KV lock heartbeat fails       | Swallowed. Lock may be stolen by another instance.                                    |
+| KV unavailable                | Lock skipped entirely. Engine proceeds without single-owner guarantee.                |
 
 ---
 
@@ -662,16 +675,16 @@ The `EphemeralEngine` is not imported directly. It is managed by the `AlertManag
 // Set evaluator (must be called BEFORE listen to enter owner mode)
 alert.setEvaluator((rollingState) => {
   // return true for breach, false for clear
-  return rollingState['sensor-01']?.temperature?.value > 85;
+  return rollingState["sensor-01"]?.temperature?.value > 85;
 });
 
 // Start the engine
 await alert.listen({
-  onFire: (data) => { },
-  onResolved: (data) => { },
-  onAck: (data) => { },
-  onAckAll: (data) => { },
-  onError: (err) => { },       // owner mode only
+  onFire: (data) => {},
+  onResolved: (data) => {},
+  onAck: (data) => {},
+  onAckAll: (data) => {},
+  onError: (err) => {}, // owner mode only
 });
 
 // Stop the engine (releases lock, deletes consumers, resets state)
@@ -683,47 +696,50 @@ await alert.stop();
 ```js
 // Create an ephemeral alert rule on the backend
 const alert = await app.alert.createEphemeral({
-  name: 'my_alert',
-  description: 'High temperature alert',
+  name: "my_alert",
+  description: "High temperature alert",
   config: {
     topic: {
-      source: 'TELEMETRY',         // 'TELEMETRY' | 'COMMAND' | 'EVENT'
-      device_ident: 's-3',         // device ident or '*' for all
-      last_token: '*',             // metric name or '*' for all
+      source: "TELEMETRY", // 'TELEMETRY' | 'COMMAND' | 'EVENT'
+      device_ident: "s-3", // device ident or '*' for all
+      last_token: "*", // metric name or '*' for all
     },
-    duration: 5,                   // seconds
-    recovery_duration: 10,         // seconds
-    cooldown: 10,                  // seconds (optional, default 0)
+    duration: 5, // seconds
+    recovery_duration: 10, // seconds
+    cooldown: 10, // seconds (optional, default 0)
   },
-  notification_channel: [],        // notification channel IDs
+  notification_channel: [], // notification channel IDs
 });
 
 // Retrieve existing alert
-const alert = await app.alert.get('my_alert');
+const alert = await app.alert.get("my_alert");
 
 // Ack from listener (sends RPC to owner)
 await app.alert.ack({
   alert_id: alert.id,
-  device_id: 's-3',
-  acked_by: 'operator',
-  ack_notes: 'Looking into it',
+  device_id: "s-3",
+  acked_by: "operator",
+  ack_notes: "Looking into it",
 });
 
 // Ack all from listener
 await app.alert.ackAll({
   alert_id: alert.id,
-  acked_by: 'operator',
+  acked_by: "operator",
 });
 
 // Mute
 await app.alert.mute({
   id: alert.id,
-  mute_config: { type: 'FOREVER' },
+  mute_config: { type: "FOREVER" },
 });
 
 await app.alert.mute({
   id: alert.id,
-  mute_config: { type: 'TIME_BASED', mute_till: new Date(Date.now() + 60000).toISOString() },
+  mute_config: {
+    type: "TIME_BASED",
+    mute_till: new Date(Date.now() + 60000).toISOString(),
+  },
 });
 
 // Unmute
@@ -733,9 +749,9 @@ await app.alert.unmute(alert.id);
 ### EphemeralEngine Getters
 
 ```js
-engine.state         // { status, last_evaluated_at, breached_since, ... }
-engine.rollingState  // { "sensor-01": { "temperature": { value, timestamp } } }
-engine.mode          // 'owner' | 'listener' | null
+engine.state; // { status, last_evaluated_at, breached_since, ... }
+engine.rollingState; // { "sensor-01": { "temperature": { value, timestamp } } }
+engine.mode; // 'owner' | 'listener' | null
 ```
 
 ---
@@ -771,7 +787,7 @@ This example creates (or fetches) an ephemeral alert named `ephemeral_multi_metr
 3. **Sets the evaluator** via `setEvaluator()` — this makes this instance the **owner**. The evaluator receives the full rolling state and checks both metrics:
    ```js
    alert.setEvaluator((data) => {
-     const device = data['s-3'];
+     const device = data["s-3"];
      if (!device) return false;
      const temp = device.temperature?.value;
      const humidity = device.humidity?.value;
@@ -784,14 +800,14 @@ This example creates (or fetches) an ephemeral alert named `ephemeral_multi_metr
 
 **Alert config:**
 
-| Field | Value | Meaning |
-|-------|-------|---------|
-| `topic.source` | `'TELEMETRY'` | Subscribe to the telemetry JetStream subject |
-| `topic.device_ident` | `'s-3'` | Single device |
-| `topic.last_token` | `'*'` | All metrics — rolling state accumulates `temperature`, `humidity`, etc. |
-| `duration` | `5` | Breach must hold for 5 seconds before firing |
-| `recovery_duration` | `10` | Clear must hold for 10 seconds before resolving |
-| `cooldown` | `10` | Minimum 10 seconds between re-fires |
+| Field                | Value         | Meaning                                                                 |
+| -------------------- | ------------- | ----------------------------------------------------------------------- |
+| `topic.source`       | `'TELEMETRY'` | Subscribe to the telemetry JetStream subject                            |
+| `topic.device_ident` | `'s-3'`       | Single device                                                           |
+| `topic.last_token`   | `'*'`         | All metrics — rolling state accumulates `temperature`, `humidity`, etc. |
+| `duration`           | `5`           | Breach must hold for 5 seconds before firing                            |
+| `recovery_duration`  | `10`          | Clear must hold for 10 seconds before resolving                         |
+| `cooldown`           | `10`          | Minimum 10 seconds between re-fires                                     |
 
 **Rolling state shape** (what the evaluator receives):
 
@@ -819,14 +835,14 @@ This example connects as a **listener** (no evaluator) to the same alert rule. I
 3. **Starts listening** without calling `setEvaluator()` — this makes it a **listener**. It subscribes to the alert event JetStream subject `{orgID}.{env}.alerts.listen.{rule_id}.*` and routes incoming events to callbacks.
 4. **Presents an interactive CLI** using Node's `readline`:
 
-   | Command | Action | NATS Path |
-   |---------|--------|-----------|
-   | `1` | Ack (single device) | `app.alert.ack()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.ack` |
-   | `2` | Ack all | `app.alert.ackAll()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.ack_all` |
-   | `3` | Mute (FOREVER) | `app.alert.mute()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.mute` |
-   | `4` | Mute (TIME_BASED, 60s) | `app.alert.mute()` → same subject, with `mute_till` |
-   | `5` | Unmute | `app.alert.unmute()` → same subject, with `type: 'CLEAR'` |
-   | `q` | Quit | Stops the engine and disconnects |
+   | Command | Action                 | NATS Path                                                                              |
+   | ------- | ---------------------- | -------------------------------------------------------------------------------------- |
+   | `1`     | Ack (single device)    | `app.alert.ack()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.ack`        |
+   | `2`     | Ack all                | `app.alert.ackAll()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.ack_all` |
+   | `3`     | Mute (FOREVER)         | `app.alert.mute()` → NATS request to `{orgID}.{env}.alerts.custom.{rule_id}.mute`      |
+   | `4`     | Mute (TIME_BASED, 60s) | `app.alert.mute()` → same subject, with `mute_till`                                    |
+   | `5`     | Unmute                 | `app.alert.unmute()` → same subject, with `type: 'CLEAR'`                              |
+   | `q`     | Quit                   | Stops the engine and disconnects                                                       |
 
 5. **Shuts down gracefully** on `q` or when the readline interface closes.
 

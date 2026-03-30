@@ -1,17 +1,17 @@
-import { RelayApp } from '../src/index.js';
+import { RelayApp } from "../src/index.js";
 
 const app = new RelayApp({
-    api_key: process.env.RELAY_API_KEY,
-    secret: process.env.RELAY_SECRET,
-    mode: 'test',
+  api_key: process.env.RELAY_API_KEY,
+  secret: process.env.RELAY_SECRET,
+  mode: "test",
 });
 
 app.connection.listeners((event) => {
-    console.log(`[connection] ${event}`);
+  console.log(`[connection] ${event}`);
 });
 
 await app.connect();
-console.log('Connected to RelayX\n');
+console.log("Connected to RelayX\n");
 
 // ── List all devices ─────────────────────────────────────────
 
@@ -22,31 +22,31 @@ devices.forEach((d) => console.log(`  - ${d.ident} (${d.id})`));
 // ── Create a device ──────────────────────────────────────────
 
 const created = await app.device.create({
-    ident: 'test_sensor_01',
-    schema: { temperature: 'float', humidity: 'float' },
-    config: { interval: 30 },
+  ident: "test_sensor_01",
+  schema: { temperature: "float", humidity: "float" },
+  config: { interval: 30 },
 });
-console.log('\nCreated:', created?.ident, created?.id);
+console.log("\nCreated:", created?.ident, created?.id);
 
 // ── Get a device ─────────────────────────────────────────────
 
-const device = await app.device.get({ ident: 'test_sensor_01' });
-console.log('\nGet:', device.ident, device.id);
+const device = await app.device.get({ ident: "test_sensor_01" });
+console.log("\nGet:", device.ident, device.id);
 
 // ── Update a device ──────────────────────────────────────────
 
 const updated = await app.device.update({
-    id: created.id,
-    ident: 'test_sensor_02',
-    schema: { temperature: 'float', humidity: 'float', pressure: 'float' },
-    config: { interval: 15 },
+  id: created.id,
+  ident: "test_sensor_02",
+  schema: { temperature: "float", humidity: "float", pressure: "float" },
+  config: { interval: 15 },
 });
-console.log('\nUpdated:', updated);
+console.log("\nUpdated:", updated);
 
 // ── Delete a device ──────────────────────────────────────────
 
-const deleted = await app.device.delete('test_sensor_02');
-console.log('\nDeleted:', deleted);
+const deleted = await app.device.delete("test_sensor_02");
+console.log("\nDeleted:", deleted);
 
 // ── Verify deletion ──────────────────────────────────────────
 
@@ -55,4 +55,4 @@ console.log(`\nDevices after delete (${after.length}):`);
 after.forEach((d) => console.log(`  - ${d.ident} (${d.id})`));
 
 await app.disconnect();
-console.log('\nDisconnected');
+console.log("\nDisconnected");

@@ -11,20 +11,20 @@ npm install relayx-app-js
 ## Quick Start
 
 ```js
-import { RelayApp } from 'relayx-app-js';
+import { RelayApp } from "relayx-app-js";
 
 const app = new RelayApp({
-  api_key: '<YOUR_API_KEY>',
-  secret: '<YOUR_SECRET>',
-  mode: 'production',
+  api_key: "<YOUR_API_KEY>",
+  secret: "<YOUR_SECRET>",
+  mode: "production",
 });
 
 app.connection.listeners((event) => console.log(`[connection] ${event}`));
 await app.connect();
 
 await app.telemetry.stream({
-  device_ident: 'sensor-1',
-  metric: 'temperature',
+  device_ident: "sensor-1",
+  metric: "temperature",
   callback: (data) => console.log(`temp: ${JSON.stringify(data)}`),
 });
 
@@ -37,14 +37,15 @@ await app.disconnect();
 
 ```js
 const app = new RelayApp({
-  api_key: '<YOUR_API_KEY>',   // JWT credential from RelayX console
-  secret: '<YOUR_SECRET>',      // Secret key
-  mode: 'production',           // 'production' | 'test'
-  debug: false,                 // Enable debug logging (default: false)
+  api_key: "<YOUR_API_KEY>", // JWT credential from RelayX console
+  secret: "<YOUR_SECRET>", // Secret key
+  mode: "production", // 'production' | 'test'
+  debug: false, // Enable debug logging (default: false)
 });
 ```
 
 Get your credentials at [console.relay-x.io](https://console.relay-x.io).
+
 <!-- TODO: Link to sign-up tutorial -->
 
 ## Connection
@@ -79,14 +80,14 @@ await app.connection.presenceOff();
 const devices = await app.device.list();
 
 // Get a single device
-const device = await app.device.get({ ident: 'sensor-1' });
+const device = await app.device.get({ ident: "sensor-1" });
 
 // Create a device
 const newDevice = await app.device.create({
-  ident: 'sensor-1',
+  ident: "sensor-1",
   schema: {
-    temperature: { type: 'number', unit: 'Celsius', unit_symbol: '°C' },
-    humidity: { type: 'number', unit: 'Percentage', unit_symbol: '%' },
+    temperature: { type: "number", unit: "Celsius", unit_symbol: "°C" },
+    humidity: { type: "number", unit: "Percentage", unit_symbol: "%" },
   },
   config: {},
 });
@@ -98,7 +99,7 @@ const updated = await app.device.update({
 });
 
 // Delete a device
-await app.device.delete('sensor-1');
+await app.device.delete("sensor-1");
 ```
 
 ## Telemetry
@@ -110,33 +111,34 @@ Stream real-time telemetry from a device. The `metric` is validated against the 
 ```js
 // Stream a specific metric
 await app.telemetry.stream({
-  device_ident: 'sensor-1',
-  metric: 'temperature',
-  callback: (data) => console.log(`[${data.metric}] ${JSON.stringify(data.data)}`),
+  device_ident: "sensor-1",
+  metric: "temperature",
+  callback: (data) =>
+    console.log(`[${data.metric}] ${JSON.stringify(data.data)}`),
 });
 
 // Stream all metrics
 await app.telemetry.stream({
-  device_ident: 'sensor-1',
-  metric: '*',
+  device_ident: "sensor-1",
+  metric: "*",
   callback: (data) => console.log(data),
 });
 
 // Unsubscribe from specific metrics
-await app.telemetry.off({ device_ident: 'sensor-1', metric: ['temperature'] });
+await app.telemetry.off({ device_ident: "sensor-1", metric: ["temperature"] });
 
 // Unsubscribe from all metrics for a device
-await app.telemetry.off({ device_ident: 'sensor-1' });
+await app.telemetry.off({ device_ident: "sensor-1" });
 ```
 
 ### History
 
 ```js
 const history = await app.telemetry.history({
-  device_ident: 'sensor-1',
-  fields: ['temperature', 'humidity'],
-  start: '2026-03-01T00:00:00.000Z',
-  end: '2026-03-25T00:00:00.000Z',
+  device_ident: "sensor-1",
+  fields: ["temperature", "humidity"],
+  start: "2026-03-01T00:00:00.000Z",
+  end: "2026-03-25T00:00:00.000Z",
 });
 ```
 
@@ -146,8 +148,8 @@ Fetches the most recent telemetry values (last 24 hours).
 
 ```js
 const latest = await app.telemetry.latest({
-  device_ident: 'sensor-1',
-  fields: ['temperature', 'humidity'],
+  device_ident: "sensor-1",
+  fields: ["temperature", "humidity"],
 });
 ```
 
@@ -158,18 +160,18 @@ Send one-way commands to devices.
 ```js
 // Send to one or more devices
 const result = await app.command.send({
-  name: 'set_interval',
-  device_ident: ['sensor-1', 'sensor-2'],
+  name: "set_interval",
+  device_ident: ["sensor-1", "sensor-2"],
   data: { interval: 5000 },
 });
 // result: { 'sensor-1': { sent: true }, 'sensor-2': { sent: true } }
 
 // Command history
 const history = await app.command.history({
-  name: 'set_interval',
-  device_idents: ['sensor-1'],
-  start: '2026-03-01T00:00:00.000Z',
-  end: '2026-03-25T00:00:00.000Z',
+  name: "set_interval",
+  device_idents: ["sensor-1"],
+  start: "2026-03-01T00:00:00.000Z",
+  end: "2026-03-25T00:00:00.000Z",
 });
 ```
 
@@ -179,8 +181,8 @@ Make request/reply calls to devices.
 
 ```js
 const response = await app.rpc.call({
-  device_ident: 'sensor-1',
-  name: 'get_status',
+  device_ident: "sensor-1",
+  name: "get_status",
   data: { verbose: true },
   timeout: 10, // seconds (default: 10)
 });
@@ -192,11 +194,11 @@ Subscribe to device-published events.
 
 ```js
 await app.events.stream({
-  name: 'door_opened',
+  name: "door_opened",
   callback: (data) => console.log(`Event: ${JSON.stringify(data)}`),
 });
 
-await app.events.off({ name: 'door_opened' });
+await app.events.off({ name: "door_opened" });
 ```
 
 ## Alerts
@@ -206,16 +208,19 @@ await app.events.off({ name: 'door_opened' });
 ```js
 // Create a threshold alert
 const alert = await app.alert.create({
-  name: 'high-temp',
-  type: 'THRESHOLD', // 'THRESHOLD' | 'RATE_CHANGE'
-  metric: 'temperature',
+  name: "high-temp",
+  type: "THRESHOLD", // 'THRESHOLD' | 'RATE_CHANGE'
+  metric: "temperature",
   config: { threshold: 85, duration: 5 },
-  notification_channel: ['ops-webhook'],
+  notification_channel: ["ops-webhook"],
 });
 
 // Get, update, delete
-const fetched = await app.alert.get('high-temp');
-const updated = await app.alert.update({ id: fetched.id, config: { threshold: 90 } });
+const fetched = await app.alert.get("high-temp");
+const updated = await app.alert.update({
+  id: fetched.id,
+  config: { threshold: 90 },
+});
 await app.alert.delete(fetched.id);
 
 // List all alerts
@@ -225,13 +230,13 @@ const alerts = await app.alert.list();
 ### Listening
 
 ```js
-const alert = await app.alert.get('high-temp');
+const alert = await app.alert.get("high-temp");
 
 await alert.listen({
-  on_fire: (data) => console.log('FIRED:', data),
-  on_resolved: (data) => console.log('RESOLVED:', data),
-  on_ack: (data) => console.log('ACK:', data),
-  on_ack_all: (data) => console.log('ACK ALL:', data),
+  on_fire: (data) => console.log("FIRED:", data),
+  on_resolved: (data) => console.log("RESOLVED:", data),
+  on_ack: (data) => console.log("ACK:", data),
+  on_ack_all: (data) => console.log("ACK ALL:", data),
 });
 ```
 
@@ -239,11 +244,11 @@ await alert.listen({
 
 ```js
 const history = await app.alert.history({
-  rule_type: 'RULE', // 'RULE' | 'DEVICE'
+  rule_type: "RULE", // 'RULE' | 'DEVICE'
   rule_id: alert.id,
-  rule_states: ['fire', 'resolved'],
-  start: '2026-03-01T00:00:00.000Z',
-  end: '2026-03-25T00:00:00.000Z',
+  rule_states: ["fire", "resolved"],
+  start: "2026-03-01T00:00:00.000Z",
+  end: "2026-03-25T00:00:00.000Z",
 });
 ```
 
@@ -252,16 +257,16 @@ const history = await app.alert.history({
 ```js
 // Acknowledge for a specific device
 await app.alert.ack({
-  device_id: '<device_id>',
+  device_id: "<device_id>",
   alert_id: alert.id,
-  acked_by: 'operator-1',
-  ack_notes: 'Investigating',
+  acked_by: "operator-1",
+  ack_notes: "Investigating",
 });
 
 // Acknowledge all instances
 await app.alert.ackAll({
   alert_id: alert.id,
-  acked_by: 'operator-1',
+  acked_by: "operator-1",
 });
 ```
 
@@ -270,7 +275,7 @@ await app.alert.ackAll({
 ```js
 await app.alert.mute({
   id: alert.id,
-  mute_config: { type: 'FOREVER' },
+  mute_config: { type: "FOREVER" },
   // or { type: 'TIME_BASED', mute_till: '2026-04-01T00:00:00.000Z' }
 });
 
@@ -284,28 +289,28 @@ Ephemeral alerts let you define custom alert rules that are evaluated client-sid
 ```js
 // Create an ephemeral alert
 const alert = await app.alert.createEphemeral({
-  name: 'custom-temp-alert',
+  name: "custom-temp-alert",
   config: {
     topic: {
-      source: 'TELEMETRY',
-      device_ident: 'sensor-1',
-      last_token: 'temperature',
+      source: "TELEMETRY",
+      device_ident: "sensor-1",
+      last_token: "temperature",
     },
     duration: 5,
     recovery_duration: 10,
-    recovery_eval_type: 'VALUE',
+    recovery_eval_type: "VALUE",
   },
 });
 
 // Set your evaluator
 alert.setEvaluator(
-  (state) => (state['sensor-1']?.temperature?.value ?? 0) > 85
+  (state) => (state["sensor-1"]?.temperature?.value ?? 0) > 85,
 );
 
 // Start monitoring
 await alert.listen({
-  on_fire: (data) => console.log('ALERT:', data),
-  on_resolved: (data) => console.log('RESOLVED:', data),
+  on_fire: (data) => console.log("ALERT:", data),
+  on_resolved: (data) => console.log("RESOLVED:", data),
 });
 
 // Stop
@@ -319,16 +324,16 @@ Group devices by tags for batch operations and streaming.
 ```js
 // Create
 const group = await app.logicalGroup.create({
-  name: 'floor-1-sensors',
-  tags: ['floor_1', 'temperature'],
-  device_idents: ['sensor-1', 'sensor-2'],
+  name: "floor-1-sensors",
+  tags: ["floor_1", "temperature"],
+  device_idents: ["sensor-1", "sensor-2"],
 });
 
 // Update membership
 const updated = await app.logicalGroup.update({
   id: group.id,
-  devices: { add: ['sensor-3'], remove: ['sensor-1'] },
-  tags: { add: ['humidity'], remove: ['floor_1'] },
+  devices: { add: ["sensor-3"], remove: ["sensor-1"] },
+  tags: { add: ["humidity"], remove: ["floor_1"] },
 });
 
 // List, get, delete
@@ -343,7 +348,7 @@ await app.logicalGroup.delete(group.id);
 Each group instance has `stream()` and `off()` methods.
 
 ```js
-const group = await app.logicalGroup.get('<group_id>');
+const group = await app.logicalGroup.get("<group_id>");
 
 await group.stream({
   callback: (data) => console.log(data),
@@ -359,16 +364,16 @@ Organize devices in a hierarchy path (e.g., `building_1.floor_2.zone_a`).
 ```js
 // Create
 const group = await app.heirarchyGroup.create({
-  name: 'zone-a-sensors',
-  heirarchy: 'building_1.floor_2.zone_a',
-  device_idents: ['sensor-1', 'sensor-2'],
+  name: "zone-a-sensors",
+  heirarchy: "building_1.floor_2.zone_a",
+  device_idents: ["sensor-1", "sensor-2"],
 });
 
 // Update
 const updated = await app.heirarchyGroup.update({
   id: group.id,
-  devices: { add: ['sensor-3'], remove: [] },
-  heirarchy: 'building_1.floor_3.zone_a',
+  devices: { add: ["sensor-3"], remove: [] },
+  heirarchy: "building_1.floor_3.zone_a",
 });
 
 // List, get, delete
@@ -383,20 +388,20 @@ await app.heirarchyGroup.delete(group.id);
 Supports metric and hierarchy path filtering with wildcards.
 
 ```js
-const group = await app.heirarchyGroup.get('<group_id>');
+const group = await app.heirarchyGroup.get("<group_id>");
 
 // Stream all data
 await group.stream({ callback: (data) => console.log(data) });
 
 // Filter by metric
 await group.stream({
-  metric: 'temperature',
+  metric: "temperature",
   callback: (data) => console.log(data),
 });
 
 // Filter by hierarchy path (supports * and > wildcards)
 await group.stream({
-  heirarchy: 'building_1.*.zone_a',
+  heirarchy: "building_1.*.zone_a",
   callback: (data) => console.log(data),
 });
 
@@ -410,31 +415,31 @@ Create webhook or email notification channels for alerts.
 ```js
 // Webhook
 const notif = await app.notification.create({
-  name: 'ops-webhook',
-  type: 'WEBHOOK',
-  config: { endpoint: 'https://hooks.example.com/alerts' },
+  name: "ops-webhook",
+  type: "WEBHOOK",
+  config: { endpoint: "https://hooks.example.com/alerts" },
 });
 
 // Email
 const emailNotif = await app.notification.create({
-  name: 'ops-email',
-  type: 'EMAIL',
+  name: "ops-email",
+  type: "EMAIL",
   config: {
-    recipients: ['ops@example.com'],
-    subject: 'Alert Notification',
-    template: 'Alert {{alert_name}} fired on {{device_ident}}',
+    recipients: ["ops@example.com"],
+    subject: "Alert Notification",
+    template: "Alert {{alert_name}} fired on {{device_ident}}",
   },
 });
 
 // Update, delete, list, get
 const updated = await app.notification.update({
-  name: 'ops-webhook',
-  type: 'WEBHOOK',
-  config: { endpoint: 'https://new-url.com' },
+  name: "ops-webhook",
+  type: "WEBHOOK",
+  config: { endpoint: "https://new-url.com" },
 });
 await app.notification.delete(notif.id);
 const all = await app.notification.list();
-const fetched = await app.notification.get('<notif_id>');
+const fetched = await app.notification.get("<notif_id>");
 ```
 
 ## Offline Behavior
@@ -450,8 +455,8 @@ The SDK throws standard `Error` objects with descriptive messages.
 ```js
 try {
   await app.telemetry.stream({
-    device_ident: 'sensor-1',
-    metric: 'nonexistent',
+    device_ident: "sensor-1",
+    metric: "nonexistent",
     callback: () => {},
   });
 } catch (err) {
