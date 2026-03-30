@@ -1,17 +1,19 @@
 # RelayX App SDK for JavaScript
 
-Official JavaScript SDK for building applications on the RelayX Network.
+Official JavaScript SDK for building applications on the RelayX platform.
+
+> **[View Full Documentation →](https://docs.relay-x.io/app-sdk/overview)**
 
 ## Installation
 
 ```bash
-npm install relayx-app-js
+npm install @relayx/app-sdk
 ```
 
 ## Quick Start
 
 ```js
-import { RelayApp } from "relayx-app-js";
+import { RelayApp } from "@relayx/app-sdk";
 
 const app = new RelayApp({
   api_key: "<YOUR_API_KEY>",
