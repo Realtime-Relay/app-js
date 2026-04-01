@@ -1,6 +1,6 @@
 {
   "name": "@relay-x/app-sdk",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "RelayX App SDK for IoT device management",
   "type": "module",
   "main": "src/index.js",
