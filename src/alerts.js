@@ -16,7 +16,8 @@ import { EphemeralEngine } from "./ephemeral_alerting/index.js";
 
 const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
 const VALID_RULE_TYPES = ["DEVICE", "RULE"];
-const VALID_RULE_STATES = ["fire", "resolved", "ack", "ack_all"];
+const VALID_EVENT_STATES = ["fire", "resolved"];
+const VALID_ACK_STATES = ["ack", "ack_all"];
 
 export class AlertManager {
   #ctx;
@@ -289,27 +290,18 @@ export class AlertManager {
         throw new Error("rule_id is required for rule_type RULE");
     }
 
-    validateNonEmptyArray(params.rule_states, "rule_states");
+    if (params.rule_states) {
+      validateNonEmptyArray(params.rule_states, "rule_states");
 
-    const invalidStates = params.rule_states.filter(
-      (s) => !VALID_RULE_STATES.includes(s),
-    );
-
-    if (invalidStates.length > 0) {
-      throw new Error(
-        `rule_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_RULE_STATES.join(", ")}`,
+      const invalidStates = params.rule_states.filter(
+        (s) => !VALID_EVENT_STATES.includes(s),
       );
-    }
 
-    // ack and ack_all require rule_id
-    const needsRuleId = params.rule_states.some(
-      (s) => s === "ack" || s === "ack_all",
-    );
-
-    if (needsRuleId && !params.rule_id) {
-      throw new Error(
-        "rule_id is required when rule_states includes ack or ack_all",
-      );
+      if (invalidStates.length > 0) {
+        throw new Error(
+          `rule_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_EVENT_STATES.join(", ")}`,
+        );
+      }
     }
 
     validateISO8601(params.start, "start");
@@ -319,7 +311,7 @@ export class AlertManager {
     const payload = {
       rule_type: params.rule_type,
       env: this.#ctx.env,
-      rule_states: params.rule_states,
+      rule_states: params.rule_states || ["fire", "resolved"],
       start: params.start,
       end: params.end,
     };
@@ -344,7 +336,61 @@ export class AlertManager {
     const decoded = msgpackDecode(res.data);
 
     if (decoded.status === "ALERT_FETCH_SUCCESS") {
-      return decoded.data;
+      return {
+        has_more: decoded.data.has_more,
+        cursor: decoded.data.cursor,
+        data: decoded.data.data,
+      };
+    }
+
+    return decoded;
+  }
+
+  async ackHistory(params) {
+    validateConnected(this.#ctx.connected);
+
+    if (!params.rule_id) throw new Error("rule_id is required");
+
+    if (params.ack_states) {
+      validateNonEmptyArray(params.ack_states, "ack_states");
+
+      const invalidStates = params.ack_states.filter(
+        (s) => !VALID_ACK_STATES.includes(s),
+      );
+
+      if (invalidStates.length > 0) {
+        throw new Error(
+          `ack_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_ACK_STATES.join(", ")}`,
+        );
+      }
+    }
+
+    validateISO8601(params.start, "start");
+    validateISO8601(params.end, "end");
+    validateStartBeforeEnd(params.start, params.end);
+
+    const payload = {
+      rule_id: params.rule_id,
+      env: this.#ctx.env,
+      ack_states: params.ack_states || ["ack", "ack_all"],
+      start: params.start,
+      end: params.end,
+    };
+
+    const res = await this.#ctx.natsClient.request(
+      `api.iot.db.${this.#ctx.orgID}.alerts.ack_history`,
+      this.#codec.encode(payload),
+      { timeout: 20000 },
+    );
+
+    const decoded = msgpackDecode(res.data);
+
+    if (decoded.status === "ALERT_ACK_FETCH_SUCCESS") {
+      return {
+        has_more: decoded.data.has_more,
+        cursor: decoded.data.cursor,
+        data: decoded.data.data,
+      };
     }
 
     return decoded;
