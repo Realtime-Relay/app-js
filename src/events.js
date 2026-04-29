@@ -3,7 +3,12 @@ import {
   validateEventName,
   validateFunction,
   validateConnected,
+  validateIdent,
+  validateNonEmptyArray,
+  validateISO8601,
+  validateStartBeforeEnd,
 } from "./validation.js";
+import { streamHistory } from "./utils.js";
 
 export class EventManager {
   #ctx;
@@ -64,6 +69,78 @@ export class EventManager {
       this.#consumers.delete(params.name);
       this.#callbacks.delete(params.name);
     }
+  }
+
+  // ─── History ─────────────────────────────────────────────
+
+  /**
+   * Fetch historical events over the streaming protocol.
+   *
+   * params:
+   *   device_ident  string   required
+   *   event_names   string[] required
+   *   start, end    ISO8601  required
+   *   interval, aggregate_fn  optional
+   *   onFrame       function? live frame callback
+   *
+   * Returns: { <event_name>: [{value, timestamp}, ...] }
+   */
+  async history(params) {
+    validateConnected(this.#ctx.connected);
+    validateIdent(params.device_ident, "device_ident");
+    validateNonEmptyArray(params.event_names, "event_names");
+    for (const name of params.event_names) {
+      validateEventName(name);
+    }
+    validateISO8601(params.start, "start");
+    validateISO8601(params.end, "end");
+    validateStartBeforeEnd(params.start, params.end);
+
+    if (params.onFrame !== undefined) {
+      validateFunction(params.onFrame, "onFrame");
+    }
+
+    const deviceId = await this.#ctx.device.resolveDeviceId(
+      params.device_ident,
+    );
+
+    const payload = {
+      device_id: deviceId,
+      env: this.#ctx.env,
+      event_names: params.event_names,
+      start: params.start,
+      end: params.end,
+    };
+    if (params.interval) payload.interval = params.interval;
+    if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
+
+    const result = await streamHistory(
+      this.#ctx,
+      `api.iot.db.${this.#ctx.orgID}.event.history`,
+      payload,
+      { onFrame: params.onFrame },
+    );
+
+    if (result.error) {
+      throw new Error(
+        `Event history failed: ${result.errorMessage ?? result.status}`,
+      );
+    }
+
+    const events = {};
+    for (const name of params.event_names) {
+      events[name] = [];
+    }
+
+    for (const frame of result.frames) {
+      if (!frame.data) continue;
+      for (const [name, point] of Object.entries(frame.data)) {
+        if (!events[name]) events[name] = [];
+        events[name].push({ value: point.value, timestamp: point.timestamp });
+      }
+    }
+
+    return events;
   }
 
   async deleteAllConsumers() {

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { encode as msgpackEncode } from "@msgpack/msgpack";
-import { createMockContext, createMockConsumer } from "./setup.js";
+import {
+  createMockContext,
+  createMockConsumer,
+  mockStreamHistory,
+} from "./setup.js";
 import { DeviceManager } from "../src/device.js";
 import { AlertManager } from "../src/alerts.js";
 import { JSONCodec } from "nats.ws";
@@ -362,31 +366,41 @@ describe("AlertManager", () => {
     const validStart = "2026-03-01T00:00:00.000Z";
     const validEnd = "2026-03-25T00:00:00.000Z";
 
-    const alertHistoryResponse = {
-      status: "ALERT_FETCH_SUCCESS",
-      data: {
-        has_more: false,
-        cursor: null,
+    const sampleFrames = [
+      {
+        last: false,
         data: {
-          fire: [{ timestamp: "2026-03-25T00:00:00.000Z", rule_id: "rule_1" }],
-          resolved: [],
+          fire: {
+            value: { rule_id: "rule_1" },
+            timestamp: 1742860800000,
+            incident_id: "incident-A",
+          },
         },
       },
-    };
+      {
+        last: true,
+        data: {
+          resolved: {
+            value: { rule_id: "rule_1" },
+            timestamp: 1742861000000,
+            incident_id: "incident-A",
+          },
+        },
+      },
+    ];
 
-    function withMsgpackHistory(ctx) {
-      const originalRequest = ctx.natsClient.request;
-      ctx.natsClient.request = vi.fn(async (subject, data, opts) => {
-        if (subject === "api.iot.db.test_org_123.alerts.history") {
-          return { data: msgpackEncode(alertHistoryResponse) };
-        }
-        return originalRequest(subject, data, opts);
-      });
+    function withStreamHistory(ctx, frames = sampleFrames) {
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.alerts.history",
+        "ALERT_FETCH_STREAM_STARTED",
+        frames,
+      );
     }
 
-    it("fetches history by DEVICE", async () => {
+    it("fetches history by DEVICE and returns chronological events", async () => {
       const ctx = makeCtx();
-      withMsgpackHistory(ctx);
+      withStreamHistory(ctx);
       const am = new AlertManager(ctx);
 
       const result = await am.history({
@@ -397,9 +411,10 @@ describe("AlertManager", () => {
         end: validEnd,
       });
 
-      expect(result.has_more).toBe(false);
-      expect(result.data.fire).toHaveLength(1);
-      expect(result.data.resolved).toHaveLength(0);
+      expect(result.events).toHaveLength(2);
+      expect(result.events[0].state).toBe("fire");
+      expect(result.events[0].incident_id).toBe("incident-A");
+      expect(result.events[1].state).toBe("resolved");
 
       const [subject] = ctx.natsClient.request.mock.calls[0];
       expect(subject).toBe("api.iot.db.test_org_123.alerts.history");
@@ -407,7 +422,7 @@ describe("AlertManager", () => {
 
     it("fetches history by RULE", async () => {
       const ctx = makeCtx();
-      withMsgpackHistory(ctx);
+      withStreamHistory(ctx);
       const am = new AlertManager(ctx);
 
       const result = await am.history({
@@ -418,12 +433,12 @@ describe("AlertManager", () => {
         end: validEnd,
       });
 
-      expect(result.data.fire).toHaveLength(1);
+      expect(result.events).toHaveLength(2);
     });
 
     it("fetches history by RULE with optional device_ident", async () => {
       const ctx = makeCtx();
-      withMsgpackHistory(ctx);
+      withStreamHistory(ctx);
       const am = new AlertManager(ctx);
 
       const result = await am.history({
@@ -435,12 +450,12 @@ describe("AlertManager", () => {
         end: validEnd,
       });
 
-      expect(result.data.fire).toHaveLength(1);
+      expect(result.events).toHaveLength(2);
     });
 
-    it("defaults rule_states to fire and resolved", async () => {
+    it("defaults rule_states to fire/resolved/ack", async () => {
       const ctx = makeCtx();
-      withMsgpackHistory(ctx);
+      withStreamHistory(ctx);
       const am = new AlertManager(ctx);
 
       await am.history({
@@ -452,12 +467,12 @@ describe("AlertManager", () => {
 
       const [, rawData] = ctx.natsClient.request.mock.calls[0];
       const payload = JSON.parse(new TextDecoder().decode(rawData));
-      expect(payload.rule_states).toEqual(["fire", "resolved"]);
+      expect(payload.rule_states).toEqual(["fire", "resolved", "ack"]);
     });
 
     it("resolves device_ident to device_id in payload", async () => {
       const ctx = makeCtx();
-      withMsgpackHistory(ctx);
+      withStreamHistory(ctx);
       const am = new AlertManager(ctx);
 
       await am.history({
@@ -559,7 +574,22 @@ describe("AlertManager", () => {
       ).rejects.toThrow("invalid values");
     });
 
-    it("rejects ack in rule_states (use ackHistory instead)", async () => {
+    it("accepts ack in rule_states (unified event timeline)", async () => {
+      const ctx = makeCtx();
+      withStreamHistory(ctx, []);
+      const am = new AlertManager(ctx);
+
+      // Should not throw — ack is part of the unified states.
+      await am.history({
+        rule_type: "DEVICE",
+        device_ident: "sensor_01",
+        rule_states: ["fire", "ack"],
+        start: validStart,
+        end: validEnd,
+      });
+    });
+
+    it("rejects ack_all in rule_states (no longer supported)", async () => {
       const ctx = makeCtx();
       const am = new AlertManager(ctx);
 
@@ -567,7 +597,7 @@ describe("AlertManager", () => {
         am.history({
           rule_type: "DEVICE",
           device_ident: "sensor_01",
-          rule_states: ["fire", "ack"],
+          rule_states: ["fire", "ack_all"],
           start: validStart,
           end: validEnd,
         }),
@@ -599,140 +629,6 @@ describe("AlertManager", () => {
           rule_type: "DEVICE",
           device_ident: "sensor_01",
           rule_states: ["fire"],
-          start: validStart,
-          end: validEnd,
-        }),
-      ).rejects.toThrow("Not connected");
-    });
-  });
-
-  describe("ackHistory", () => {
-    const validStart = "2026-03-01T00:00:00.000Z";
-    const validEnd = "2026-03-25T00:00:00.000Z";
-
-    const ackHistoryResponse = {
-      status: "ALERT_ACK_FETCH_SUCCESS",
-      data: {
-        has_more: false,
-        cursor: null,
-        data: {
-          ack: [{ acked_by: "operator_jane", acked_at: 1711324800000 }],
-          ack_all: [],
-        },
-      },
-    };
-
-    function withMsgpackAckHistory(ctx) {
-      const originalRequest = ctx.natsClient.request;
-      ctx.natsClient.request = vi.fn(async (subject, data, opts) => {
-        if (subject === "api.iot.db.test_org_123.alerts.ack_history") {
-          return { data: msgpackEncode(ackHistoryResponse) };
-        }
-        return originalRequest(subject, data, opts);
-      });
-    }
-
-    it("fetches ack history by rule_id", async () => {
-      const ctx = makeCtx();
-      withMsgpackAckHistory(ctx);
-      const am = new AlertManager(ctx);
-
-      const result = await am.ackHistory({
-        rule_id: "rule_1",
-        ack_states: ["ack", "ack_all"],
-        start: validStart,
-        end: validEnd,
-      });
-
-      expect(result.has_more).toBe(false);
-      expect(result.data.ack).toHaveLength(1);
-      expect(result.data.ack_all).toHaveLength(0);
-
-      const [subject] = ctx.natsClient.request.mock.calls[0];
-      expect(subject).toBe("api.iot.db.test_org_123.alerts.ack_history");
-    });
-
-    it("defaults ack_states to ack and ack_all", async () => {
-      const ctx = makeCtx();
-      withMsgpackAckHistory(ctx);
-      const am = new AlertManager(ctx);
-
-      await am.ackHistory({
-        rule_id: "rule_1",
-        start: validStart,
-        end: validEnd,
-      });
-
-      const [, rawData] = ctx.natsClient.request.mock.calls[0];
-      const payload = JSON.parse(new TextDecoder().decode(rawData));
-      expect(payload.ack_states).toEqual(["ack", "ack_all"]);
-    });
-
-    it("sends rule_id and env in payload", async () => {
-      const ctx = makeCtx();
-      withMsgpackAckHistory(ctx);
-      const am = new AlertManager(ctx);
-
-      await am.ackHistory({
-        rule_id: "rule_1",
-        start: validStart,
-        end: validEnd,
-      });
-
-      const [, rawData] = ctx.natsClient.request.mock.calls[0];
-      const payload = JSON.parse(new TextDecoder().decode(rawData));
-      expect(payload.rule_id).toBe("rule_1");
-      expect(payload.env).toBe("production");
-    });
-
-    it("throws if rule_id is missing", async () => {
-      const ctx = makeCtx();
-      const am = new AlertManager(ctx);
-
-      await expect(
-        am.ackHistory({
-          ack_states: ["ack"],
-          start: validStart,
-          end: validEnd,
-        }),
-      ).rejects.toThrow("rule_id is required");
-    });
-
-    it("throws if ack_states contains invalid values", async () => {
-      const ctx = makeCtx();
-      const am = new AlertManager(ctx);
-
-      await expect(
-        am.ackHistory({
-          rule_id: "rule_1",
-          ack_states: ["ack", "invalid"],
-          start: validStart,
-          end: validEnd,
-        }),
-      ).rejects.toThrow("invalid values");
-    });
-
-    it("throws if start >= end", async () => {
-      const ctx = makeCtx();
-      const am = new AlertManager(ctx);
-
-      await expect(
-        am.ackHistory({
-          rule_id: "rule_1",
-          start: validEnd,
-          end: validStart,
-        }),
-      ).rejects.toThrow("start must be before end");
-    });
-
-    it("throws if not connected", async () => {
-      const ctx = makeCtx();
-      ctx.connected = false;
-      const am = new AlertManager(ctx);
-
-      await expect(
-        am.ackHistory({
-          rule_id: "rule_1",
           start: validStart,
           end: validEnd,
         }),

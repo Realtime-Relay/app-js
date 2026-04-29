@@ -1,5 +1,9 @@
 import { vi } from "vitest";
 import { JSONCodec } from "nats.ws";
+import {
+  encode as msgpackEncode,
+  decode as msgpackDecode,
+} from "@msgpack/msgpack";
 
 const jc = JSONCodec();
 
@@ -215,6 +219,104 @@ export function createMockCodec() {
       if (typeof data === "string") return JSON.parse(data);
       return data;
     }),
+  };
+}
+
+/**
+ * Wires the natsClient mock to act as a streaming-history server for a
+ * single endpoint. Wraps `request` to reply with STREAM_STARTED (or
+ * NO_STREAM if frames is empty), and wraps `subscribe` to yield the
+ * provided frames as msgpack-encoded messages on the export subject.
+ *
+ *   ctx           — ctx returned by createMockContext
+ *   requestSubject — e.g. "api.iot.db.test_org_123.telemetry.history"
+ *   status         — STREAM_STARTED status string for this endpoint
+ *                    (e.g. "TELEMETRY_FETCH_STREAM_STARTED")
+ *   frames         — array of frame objects { last, data, ... }
+ *                    Empty → server responds with *_NO_STREAM
+ *   options.noStreamStatus — status to use when frames is empty
+ *                    (default: replaces "_STREAM_STARTED" with "_SUCCESS_NO_STREAM")
+ *   options.failureStatus  — if set, request returns *_FAILURE instead.
+ */
+export function mockStreamHistory(ctx, requestSubject, status, frames, options = {}) {
+  const origRequest = ctx.natsClient.request;
+  const origSubscribe = ctx.natsClient.subscribe;
+
+  ctx.natsClient.request = vi.fn(async (subject, data, opts) => {
+    if (subject !== requestSubject) {
+      return origRequest(subject, data, opts);
+    }
+
+    let payload = {};
+    try {
+      payload =
+        typeof data === "string"
+          ? JSON.parse(data)
+          : JSON.parse(new TextDecoder().decode(data));
+    } catch {}
+
+    if (options.failureStatus) {
+      const reply = msgpackEncode({
+        status: options.failureStatus,
+        data: options.failureData ?? [],
+      });
+      return { json: () => msgpackDecode(reply), data: reply };
+    }
+
+    if (frames.length === 0) {
+      const noStreamStatus =
+        options.noStreamStatus ?? status.replace("_STREAM_STARTED", "_SUCCESS_NO_STREAM");
+      const reply = msgpackEncode({
+        status: noStreamStatus,
+        data: { frames: 0 },
+      });
+      return { json: () => msgpackDecode(reply), data: reply };
+    }
+
+    // Match the App-SDK side's subject convention (import.* — broker maps from
+    // server-side export.*).
+    const exportSubject = `import.${ctx.orgID}.${ctx.env}.history.${payload.stream_token}`;
+    const readySubject = `${exportSubject}.ready`;
+    const reply = msgpackEncode({
+      status,
+      data: { subject: exportSubject, ready_subject: readySubject },
+    });
+    return { json: () => msgpackDecode(reply), data: reply };
+  });
+
+  ctx.natsClient.subscribe = vi.fn((subject) => {
+    if (!subject.startsWith(`import.${ctx.orgID}.${ctx.env}.history.`)) {
+      return origSubscribe(subject);
+    }
+    const messages = frames.map((f) => ({
+      data: msgpackEncode(f),
+      subject,
+    }));
+    return createMockSubscriptionFromMessages(messages, subject);
+  });
+}
+
+function createMockSubscriptionFromMessages(messages, subject) {
+  let unsubscribed = false;
+  return {
+    [Symbol.asyncIterator]() {
+      let idx = 0;
+      return {
+        async next() {
+          if (unsubscribed || idx >= messages.length) {
+            return { done: true, value: undefined };
+          }
+          return { done: false, value: messages[idx++] };
+        },
+      };
+    },
+    unsubscribe: vi.fn(() => {
+      unsubscribed = true;
+    }),
+    drain: vi.fn(() => {
+      unsubscribed = true;
+    }),
+    _subject: subject,
   };
 }
 

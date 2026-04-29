@@ -13,11 +13,11 @@ import {
   validateStartBeforeEnd,
 } from "./validation.js";
 import { EphemeralEngine } from "./ephemeral_alerting/index.js";
+import { streamHistory } from "./utils.js";
 
 const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
 const VALID_RULE_TYPES = ["DEVICE", "RULE"];
-const VALID_EVENT_STATES = ["fire", "resolved"];
-const VALID_ACK_STATES = ["ack", "ack_all"];
+const VALID_ALERT_STATES = ["fire", "resolved", "ack"];
 
 export class AlertManager {
   #ctx;
@@ -271,129 +271,108 @@ export class AlertManager {
 
   // ─── History ──────────────────────────────────────────────
 
+  /**
+   * Fetch alert event history (fire / resolved / ack) over the streaming
+   * protocol. Returns an event timeline ordered by timestamp.
+   *
+   * params:
+   *   rule_type      "DEVICE" | "RULE"  required
+   *   device_ident   string?  required when rule_type=DEVICE
+   *   rule_id        string?  required when rule_type=RULE
+   *   rule_states    string[]?  default ["fire","resolved","ack"]
+   *   incident_id    string?  optional, filter to one incident
+   *   start, end     ISO8601 required
+   *   interval       string?  paired with aggregate_fn for bucketing
+   *   aggregate_fn   "count"? — only "count" allowed for alerts
+   *   onFrame        function? live frame callback
+   *
+   * Returns: { events: [{state, value, timestamp, incident_id}, ...] }
+   */
   async history(params) {
     validateConnected(this.#ctx.connected);
 
     if (!params.rule_type) throw new Error("rule_type is required");
-
     if (!VALID_RULE_TYPES.includes(params.rule_type)) {
       throw new Error("rule_type must be DEVICE or RULE");
     }
-
-    if (params.rule_type === "DEVICE") {
-      if (!params.device_ident)
-        throw new Error("device_ident is required for rule_type DEVICE");
+    if (params.rule_type === "DEVICE" && !params.device_ident) {
+      throw new Error("device_ident is required for rule_type DEVICE");
     }
-
-    if (params.rule_type === "RULE") {
-      if (!params.rule_id)
-        throw new Error("rule_id is required for rule_type RULE");
+    if (params.rule_type === "RULE" && !params.rule_id) {
+      throw new Error("rule_id is required for rule_type RULE");
     }
 
     if (params.rule_states) {
       validateNonEmptyArray(params.rule_states, "rule_states");
-
-      const invalidStates = params.rule_states.filter(
-        (s) => !VALID_EVENT_STATES.includes(s),
+      const invalid = params.rule_states.filter(
+        (s) => !VALID_ALERT_STATES.includes(s),
       );
-
-      if (invalidStates.length > 0) {
+      if (invalid.length > 0) {
         throw new Error(
-          `rule_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_EVENT_STATES.join(", ")}`,
+          `rule_states contains invalid values: ${invalid.join(", ")}. Valid values: ${VALID_ALERT_STATES.join(", ")}`,
         );
       }
+    }
+
+    if (params.aggregate_fn && params.aggregate_fn !== "count") {
+      throw new Error("aggregate_fn for alerts must be 'count'");
     }
 
     validateISO8601(params.start, "start");
     validateISO8601(params.end, "end");
     validateStartBeforeEnd(params.start, params.end);
 
+    if (params.onFrame !== undefined) {
+      validateFunction(params.onFrame, "onFrame");
+    }
+
     const payload = {
       rule_type: params.rule_type,
       env: this.#ctx.env,
-      rule_states: params.rule_states || ["fire", "resolved"],
+      rule_states: params.rule_states || ["fire", "resolved", "ack"],
       start: params.start,
       end: params.end,
     };
 
-    // Resolve device_ident to device_id
     if (params.device_ident) {
       payload.device_id = await this.#ctx.device.resolveDeviceId(
         params.device_ident,
       );
     }
+    if (params.rule_type === "RULE") payload.rule_id = params.rule_id;
+    if (params.incident_id) payload.incident_id = params.incident_id;
+    if (params.interval) payload.interval = params.interval;
+    if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    if (params.rule_type === "RULE") {
-      payload.rule_id = params.rule_id;
-    }
-
-    const res = await this.#ctx.natsClient.request(
+    const result = await streamHistory(
+      this.#ctx,
       `api.iot.db.${this.#ctx.orgID}.alerts.history`,
-      this.#codec.encode(payload),
-      { timeout: 20000 },
+      payload,
+      { onFrame: params.onFrame },
     );
 
-    const decoded = msgpackDecode(res.data);
-
-    if (decoded.status === "ALERT_FETCH_SUCCESS") {
-      return {
-        has_more: decoded.data.has_more,
-        cursor: decoded.data.cursor,
-        data: decoded.data.data,
-      };
+    if (result.error) {
+      throw new Error(
+        `Alert history failed: ${result.errorMessage ?? result.status}`,
+      );
     }
 
-    return decoded;
-  }
-
-  async ackHistory(params) {
-    validateConnected(this.#ctx.connected);
-
-    if (!params.rule_id) throw new Error("rule_id is required");
-
-    if (params.ack_states) {
-      validateNonEmptyArray(params.ack_states, "ack_states");
-
-      const invalidStates = params.ack_states.filter(
-        (s) => !VALID_ACK_STATES.includes(s),
-      );
-
-      if (invalidStates.length > 0) {
-        throw new Error(
-          `ack_states contains invalid values: ${invalidStates.join(", ")}. Valid values: ${VALID_ACK_STATES.join(", ")}`,
-        );
+    // Each frame: { last, data: { <state>: { value, timestamp, incident_id } } }
+    // Flatten into a chronological event list.
+    const events = [];
+    for (const frame of result.frames) {
+      if (!frame.data) continue;
+      for (const [state, point] of Object.entries(frame.data)) {
+        events.push({
+          state,
+          value: point.value,
+          timestamp: point.timestamp,
+          incident_id: point.incident_id ?? null,
+        });
       }
     }
 
-    validateISO8601(params.start, "start");
-    validateISO8601(params.end, "end");
-    validateStartBeforeEnd(params.start, params.end);
-
-    const payload = {
-      rule_id: params.rule_id,
-      env: this.#ctx.env,
-      ack_states: params.ack_states || ["ack", "ack_all"],
-      start: params.start,
-      end: params.end,
-    };
-
-    const res = await this.#ctx.natsClient.request(
-      `api.iot.db.${this.#ctx.orgID}.alerts.ack_history`,
-      this.#codec.encode(payload),
-      { timeout: 20000 },
-    );
-
-    const decoded = msgpackDecode(res.data);
-
-    if (decoded.status === "ALERT_ACK_FETCH_SUCCESS") {
-      return {
-        has_more: decoded.data.has_more,
-        cursor: decoded.data.cursor,
-        data: decoded.data.data,
-      };
-    }
-
-    return decoded;
+    return { events };
   }
 
   // ─── Ack / AckAll ────────────────────────────────────────

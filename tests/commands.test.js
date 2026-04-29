@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { encode as msgpackEncode } from "@msgpack/msgpack";
-import { createMockContext } from "./setup.js";
+import { createMockContext, mockStreamHistory } from "./setup.js";
 import { DeviceManager } from "../src/device.js";
 import { CommandManager } from "../src/commands.js";
 
@@ -109,22 +109,23 @@ describe("CommandManager", () => {
   });
 
   describe("history", () => {
-    it("sends single request with device_ids array", async () => {
+    it("sends single streaming request and aggregates frames per device ident", async () => {
       const ctx = makeCtx();
-      ctx.natsClient.request = vi.fn(async (subject) => {
-        if (subject === "api.iot.db.test_org_123.command.history") {
-          return {
-            data: msgpackEncode({
-              status: "COMMAND_FETCH_SUCCESS",
-              data: {
-                has_more: false,
-                cursor: null,
-                data: { dev_1: [{ value: {}, timestamp: 1000 }], dev_2: [] },
-              },
-            }),
-          };
-        }
-      });
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.command.history",
+        "COMMAND_FETCH_STREAM_STARTED",
+        [
+          {
+            last: false,
+            data: { dev_1: { value: { force: true }, timestamp: 1000 } },
+          },
+          {
+            last: true,
+            data: { dev_2: { value: { force: false }, timestamp: 1001 } },
+          },
+        ],
+      );
       const cm = new CommandManager(ctx);
 
       const result = await cm.history({
@@ -138,22 +139,22 @@ describe("CommandManager", () => {
         ([subj]) => subj === "api.iot.db.test_org_123.command.history",
       );
       expect(historyCalls).toHaveLength(1);
-      expect(result).toBeDefined();
-      expect(result.sensor_01).toHaveLength(1);
+      expect(result.sensor_01).toEqual([
+        { value: { force: true }, timestamp: 1000 },
+      ]);
+      expect(result.sensor_02).toEqual([
+        { value: { force: false }, timestamp: 1001 },
+      ]);
     });
 
     it("defaults end to now() if omitted", async () => {
       const ctx = makeCtx();
-      ctx.natsClient.request = vi.fn(async (subject) => {
-        if (subject === "api.iot.db.test_org_123.command.history") {
-          return {
-            data: msgpackEncode({
-              status: "COMMAND_FETCH_SUCCESS",
-              data: { has_more: false, cursor: null, data: { dev_1: [] } },
-            }),
-          };
-        }
-      });
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.command.history",
+        "COMMAND_FETCH_STREAM_STARTED",
+        [], // empty → NO_STREAM
+      );
       const cm = new CommandManager(ctx);
 
       await cm.history({

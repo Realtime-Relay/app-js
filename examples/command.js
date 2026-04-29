@@ -21,37 +21,40 @@ console.log("Connected to RelayX");
 
 // ── Send a command to a single device ────────────────────────
 
-const rebootResult = await app.command.send({
-  name: "setConfig",
-  device_ident: ["s-3"],
-  data: { force: false },
-});
+// for(let i = 0; i < 20_000; i++){
+//   const rebootResult = await app.command.send({
+//     name: "setConfig",
+//     device_ident: ["s-3"],
+//     data: { force: false },
+//   });
 
-console.log("setConfig sent:", rebootResult); // true if JetStream ack received
+//   console.log("setConfig sent:", rebootResult); // true if JetStream ack received
+// }
 
 // ── Send a command to multiple devices at once ───────────────
 
-const configResult = await app.command.send({
-  name: "update_config",
-  device_ident: ["sensor_01", "sensor_02", "sensor_03"],
-  data: {
-    sampling_interval: 15,
-    reporting_mode: "batch",
-  },
-});
+// const configResult = await app.command.send({
+//   name: "update_config",
+//   device_ident: ["sensor_01", "sensor_02", "sensor_03"],
+//   data: {
+//     sampling_interval: 15,
+//     reporting_mode: "batch",
+//   },
+// });
 
-console.log("Config push sent to 3 devices:", configResult);
+// console.log("Config push sent to 3 devices:", configResult);
 
 // ── Query command history ────────────────────────────────────
 
 const history = await app.command.history({
   name: "setConfig",
   device_idents: ["s-3"],
-  start: "2026-03-01T00:00:00.000Z",
-  end: "2026-03-30T23:59:59.000Z",
+  start: "2026-01-01T00:00:00.000Z",
+  end: "2026-12-30T23:59:59.000Z",
 });
 
 console.log(JSON.stringify(history, null, 2));
+console.log(history["s-3"].length)
 
 // // ── Clean up ─────────────────────────────────────────────────
 

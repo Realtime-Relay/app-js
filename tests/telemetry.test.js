@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { encode as msgpackEncode } from "@msgpack/msgpack";
-import { createMockContext, createMockConsumer } from "./setup.js";
+import {
+  createMockContext,
+  createMockConsumer,
+  mockStreamHistory,
+} from "./setup.js";
 import { DeviceManager } from "../src/device.js";
 import { TelemetryManager } from "../src/telemetry.js";
 
@@ -495,28 +499,30 @@ describe("TelemetryManager", () => {
   });
 
   describe("history", () => {
-    it("sends correct request with resolved device_id", async () => {
+    it("sends correct request with resolved device_id and aggregates frames", async () => {
       const { ctx } = makeCtx();
-      // Override request to return msgpack-encoded paginated response
-      ctx.natsClient.request = vi.fn(async (subject) => {
-        if (subject === "api.iot.db.test_org_123.telemetry.history") {
-          return {
-            data: msgpackEncode({
-              status: "TELEMETRY_FETCH_SUCCESS",
-              data: {
-                has_more: false,
-                cursor: null,
-                data: {
-                  temperature: [{ value: 23.5, time: "2025-01-01T12:00:00Z" }],
-                },
-              },
-            }),
-          };
-        }
-      });
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.telemetry.history",
+        "TELEMETRY_FETCH_STREAM_STARTED",
+        [
+          {
+            last: false,
+            data: {
+              temperature: { value: 23.5, timestamp: 1735689600000 },
+            },
+          },
+          {
+            last: true,
+            data: {
+              temperature: { value: 24.1, timestamp: 1735689660000 },
+            },
+          },
+        ],
+      );
       const tm = new TelemetryManager(ctx);
 
-      await tm.history({
+      const result = await tm.history({
         device_ident: "sensor_01",
         fields: ["temperature"],
         start: "2025-01-01T00:00:00.000Z",
@@ -528,6 +534,32 @@ describe("TelemetryManager", () => {
         expect.anything(),
         { timeout: 20000 },
       );
+      expect(result).toEqual({
+        temperature: [
+          { value: 23.5, timestamp: 1735689600000 },
+          { value: 24.1, timestamp: 1735689660000 },
+        ],
+      });
+    });
+
+    it("returns empty arrays on NO_STREAM response", async () => {
+      const { ctx } = makeCtx();
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.telemetry.history",
+        "TELEMETRY_FETCH_STREAM_STARTED",
+        [], // empty triggers NO_STREAM
+      );
+      const tm = new TelemetryManager(ctx);
+
+      const result = await tm.history({
+        device_ident: "sensor_01",
+        fields: ["temperature"],
+        start: "2025-01-01T00:00:00.000Z",
+        end: "2025-01-02T00:00:00.000Z",
+      });
+
+      expect(result).toEqual({ temperature: [] });
     });
 
     it("throws when fields contain invalid schema keys", async () => {
@@ -653,22 +685,21 @@ describe("TelemetryManager", () => {
   });
 
   describe("latest", () => {
-    it("sends history request with last_value true", async () => {
+    it("sends history request with last_value true and returns latest per metric", async () => {
       const { ctx } = makeCtx();
-      ctx.natsClient.request = vi.fn(async (subject) => {
-        if (subject === "api.iot.db.test_org_123.telemetry.history") {
-          return {
-            data: msgpackEncode({
-              status: "TELEMETRY_FETCH_SUCCESS",
-              data: {
-                data: {
-                  temperature: [{ value: 23.5, time: "2026-03-24T00:00:00Z" }],
-                },
-              },
-            }),
-          };
-        }
-      });
+      mockStreamHistory(
+        ctx,
+        "api.iot.db.test_org_123.telemetry.history",
+        "TELEMETRY_FETCH_STREAM_STARTED",
+        [
+          {
+            last: true,
+            data: {
+              temperature: { value: 23.5, timestamp: 1735689600000 },
+            },
+          },
+        ],
+      );
       const tm = new TelemetryManager(ctx);
 
       const result = await tm.latest({
@@ -684,7 +715,7 @@ describe("TelemetryManager", () => {
         { timeout: 20000 },
       );
       expect(result).toEqual({
-        temperature: { value: 23.5, time: "2026-03-24T00:00:00Z" },
+        temperature: { value: 23.5, timestamp: 1735689600000 },
       });
     });
 

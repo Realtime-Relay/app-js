@@ -11,10 +11,16 @@ import { decode as msgpackDecode } from "@msgpack/msgpack";
 import { buildCredentials } from "./utils.js";
 import { validateFunction } from "./validation.js";
 
+// const SERVERS = [
+//   "wss://api.relay-x.io:4421",
+//   "wss://api.relay-x.io:4422",
+//   "wss://api.relay-x.io:4423",
+// ];
+
 const SERVERS = [
-  "wss://api.relay-x.io:4421",
-  "wss://api.relay-x.io:4422",
-  "wss://api.relay-x.io:4423",
+  "ws://0.0.0.0:4421",
+  "ws://0.0.0.0:4422",
+  "ws://0.0.0.0:4423",
 ];
 
 export class ConnectionManager {

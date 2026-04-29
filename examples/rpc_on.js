@@ -18,9 +18,9 @@ console.log("Connected to RelayX");
 try {
   const result = await app.rpc.call({
     device_ident: "current-sensor",
-    name: "updateSampleRate",
+    name: "state",
     timeout: 10,
-    data: { rate: 500 },
+    data: { on: false },
   });
 
   console.log("RPC response:", result);
