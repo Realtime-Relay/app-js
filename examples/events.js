@@ -96,16 +96,48 @@ async function run() {
     }
 
     if (op === "on") {
-      const ok = await app.events.stream({
-        name,
-        callback: (data) => {
-          console.log(`[event:${name}]`, data);
-        },
-      });
-      if (ok) {
-        console.log(`Streaming events for "${name}"`);
-      } else {
-        console.log(`Already streaming "${name}"`);
+      const identsRaw = (
+        await ask('Device idents ("*" or comma-separated): ')
+      ).trim();
+      if (!identsRaw) {
+        console.log("Device idents cannot be empty.");
+        continue;
+      }
+
+      const device_ident =
+        identsRaw === "*"
+          ? "*"
+          : identsRaw
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+
+      if (Array.isArray(device_ident) && device_ident.length === 0) {
+        console.log("At least one device ident required.");
+        continue;
+      }
+
+      try {
+        const ok = await app.events.stream({
+          name,
+          device_ident,
+          callback: (payload) => {
+            // payload shape: { <device_ident>: <event_data> }
+            for (const [ident, data] of Object.entries(payload)) {
+              console.log(`[event:${name}] ${ident}`, data);
+            }
+          },
+        });
+        if (ok) {
+          const label = Array.isArray(device_ident)
+            ? device_ident.join(",")
+            : device_ident;
+          console.log(`Streaming "${name}" for [${label}]`);
+        } else {
+          console.log(`Already streaming "${name}"`);
+        }
+      } catch (err) {
+        console.error("Failed:", err.message);
       }
     } else {
       await app.events.off({ name });

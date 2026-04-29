@@ -19,16 +19,72 @@ export class EventManager {
     this.#ctx = ctx;
   }
 
+  /**
+   * Stream live events for one or more devices.
+   *
+   * params:
+   *   name          string   required — event name
+   *   device_ident  string|string[]  required:
+   *                   - "*"        → all devices in org (wildcard subject; reverse-resolved ident in callback)
+   *                   - [ident]    → single device (concrete subject)
+   *                   - [a, b, …]  → list of devices (wildcard subject + in-callback filter)
+   *                   - []         → throws
+   *   callback      function (payload) — called with { [device_ident]: data }
+   */
   async stream(params) {
     validateConnected(this.#ctx.connected);
     validateEventName(params.name);
     validateFunction(params.callback, "callback");
 
+    if (params.device_ident === undefined || params.device_ident === null) {
+      throw new Error("device_ident is required");
+    }
+
+    // deviceFilter: Map<device_id, ident> — present except in "*" wildcard mode
+    // subjectDevice: concrete device_id when filtering to exactly one device, else "*"
+    let deviceFilter = null;
+    let subjectDevice = "*";
+    let wildcard = false;
+
+    if (typeof params.device_ident === "string") {
+      if (params.device_ident !== "*") {
+        throw new Error(
+          'device_ident as a string must be "*". Use an array for specific devices.',
+        );
+      }
+      wildcard = true;
+      // Warm the device cache so the callback can reverse-resolve device_id → ident.
+      try {
+        await this.#ctx.device.list();
+      } catch {
+        // Best-effort — callback falls back to device_id as the key on miss.
+      }
+    } else if (Array.isArray(params.device_ident)) {
+      if (params.device_ident.length === 0) {
+        throw new Error("device_ident array cannot be empty");
+      }
+      for (const ident of params.device_ident) {
+        validateIdent(ident, "device_ident");
+      }
+      deviceFilter = new Map();
+      for (const ident of params.device_ident) {
+        const id = await this.#ctx.device.resolveDeviceId(ident);
+        deviceFilter.set(id, ident);
+      }
+      if (deviceFilter.size === 1) {
+        subjectDevice = [...deviceFilter.keys()][0];
+      }
+    } else {
+      throw new Error(
+        'device_ident must be "*" or a non-empty array of device idents',
+      );
+    }
+
     if (this.#consumers.has(params.name)) {
       return false;
     }
 
-    const subject = `${this.#ctx.orgID}.${this.#ctx.env}.events.*.${params.name}`;
+    const subject = `${this.#ctx.orgID}.${this.#ctx.env}.events.${subjectDevice}.${params.name}`;
 
     const consumer = await this.#ctx.jetstream.consumers.get(
       `${this.#ctx.orgID}_stream`,
@@ -45,14 +101,33 @@ export class EventManager {
     this.#consumers.set(params.name, consumer);
     this.#callbacks.set(params.name, params.callback);
 
+    const reverseLookup = (deviceId) => {
+      for (const [ident, dev] of this.#ctx.device.cache) {
+        if (dev?.id === deviceId) return ident;
+      }
+      return null;
+    };
+
     await consumer.consume({
       callback: async (msg) => {
         msg.working();
         const data = msgpackDecode(msg.data);
         msg.ack();
 
+        // subject = <org>.<env>.events.<device_id>.<name>
+        const tokens = msg.subject.split(".");
+        const deviceId = tokens[3];
+
+        let ident;
+        if (deviceFilter) {
+          ident = deviceFilter.get(deviceId);
+          if (!ident) return; // device not in this subscription's filter
+        } else if (wildcard) {
+          ident = reverseLookup(deviceId) ?? deviceId;
+        }
+
         const cb = this.#callbacks.get(params.name);
-        if (cb) cb(data);
+        if (cb) cb({ [ident]: data });
       },
     });
 
