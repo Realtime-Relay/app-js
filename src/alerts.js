@@ -377,20 +377,31 @@ export class AlertManager {
 
   // ─── Ack / AckAll ────────────────────────────────────────
 
+  /**
+   * Acknowledge the current incident for an alert.
+   *
+   *   - Backend alerts (THRESHOLD / RATE_CHANGE): incidents are scoped to
+   *     (rule, device). `device_id` REQUIRED — picks which device's incident.
+   *   - Ephemeral alerts: state is rule-scoped (one evaluator per rule), but
+   *     the ack is still tagged with `device_id` for audit/query purposes —
+   *     so the ack row is visible in `rule_type: "DEVICE"` history queries.
+   *     `device_id` REQUIRED.
+   */
   async ack(params) {
     validateConnected(this.#ctx.connected);
 
-    if (!params.device_id) throw new Error("device_id is required");
     if (!params.alert_id) throw new Error("alert_id is required");
     if (!params.acked_by) throw new Error("acked_by is required");
+    if (!params.device_id) throw new Error("device_id is required");
 
-    // Check if ephemeral with local owner engine
+    // Local ephemeral owner — in-process ack. State machine stays rule-scoped;
+    // device_id is carried into the published audit event.
     const engine = this.#ephemeralEngines.get(params.alert_id);
     if (engine && engine.mode === "owner") {
-      return engine.ack(params.acked_by, params.ack_notes);
+      return engine.ack(params.device_id, params.acked_by, params.ack_notes);
     }
 
-    // Check if ephemeral without local engine — RPC to owner
+    // Listener-side ephemeral — RPC to the remote owner.
     const meta = this.#alertMetadata.get(params.alert_id);
     if (meta?.type === "EPHEMERAL") {
       const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack`;
@@ -398,13 +409,9 @@ export class AlertManager {
       const res = await this.#ctx.natsClient.request(
         subject,
         msgpackEncode({
-          status: "acknowledged",
           device_id: params.device_id,
-          ack: {
-            acked_by: params.acked_by,
-            ack_notes: params.ack_notes,
-            acked_at: Date.now(),
-          },
+          acked_by: params.acked_by,
+          ack_notes: params.ack_notes,
         }),
         { timeout: 10000 },
       );
@@ -413,51 +420,9 @@ export class AlertManager {
       return data.status === "ACK_SUCCESS";
     }
 
-    // Non-ephemeral — backend
+    // Backend (non-ephemeral) — per-(rule, device) incident.
     const res = await this.#request("ack", {
       device_id: params.device_id,
-      rule_id: params.alert_id,
-      acked_by: params.acked_by,
-      env: this.#ctx.env,
-      ack_notes: params.ack_notes,
-    });
-
-    return res.status === "ALERT_ACK_SUCCESS";
-  }
-
-  async ackAll(params) {
-    validateConnected(this.#ctx.connected);
-
-    if (!params.alert_id) throw new Error("alert_id is required");
-    if (!params.acked_by) throw new Error("acked_by is required");
-
-    const engine = this.#ephemeralEngines.get(params.alert_id);
-    if (engine && engine.mode === "owner") {
-      return engine.ackAll(params.acked_by, params.ack_notes);
-    }
-
-    const meta = this.#alertMetadata.get(params.alert_id);
-    if (meta?.type === "EPHEMERAL") {
-      const subject = `${this.#ctx.orgID}.${this.#ctx.env}.alerts.custom.${params.alert_id}.ack_all`;
-
-      const res = await this.#ctx.natsClient.request(
-        subject,
-        msgpackEncode({
-          status: "acknowledged",
-          ack: {
-            acked_by: params.acked_by,
-            ack_notes: params.ack_notes,
-            acked_at: Date.now(),
-          },
-        }),
-        { timeout: 10000 },
-      );
-
-      const data = res.json();
-      return data.status === "ACK_SUCCESS";
-    }
-
-    const res = await this.#request("ack_all", {
       rule_id: params.alert_id,
       acked_by: params.acked_by,
       env: this.#ctx.env,
@@ -546,7 +511,6 @@ export class AlertManager {
       fire: callbacks.onFire,
       resolved: callbacks.onResolved,
       ack: callbacks.onAck,
-      ack_all: callbacks.onAckAll,
     };
 
     const consumer = await this.#ctx.jetstream.consumers.get(

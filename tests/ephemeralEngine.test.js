@@ -299,7 +299,7 @@ describe("EphemeralEngine", () => {
     });
   });
 
-  describe("ack / ackAll", () => {
+  describe("ack", () => {
     it("ack returns false when not alerting", async () => {
       const { ctx } = makeCtx();
       const engine = new EphemeralEngine(ctx, RULE);
@@ -307,16 +307,6 @@ describe("EphemeralEngine", () => {
       await engine.listen({});
 
       expect(await engine.ack("operator")).toBe(false);
-      await engine.stop();
-    });
-
-    it("ackAll returns false when not alerting", async () => {
-      const { ctx } = makeCtx();
-      const engine = new EphemeralEngine(ctx, RULE);
-      engine.setEvaluator(() => false);
-      await engine.listen({});
-
-      expect(await engine.ackAll("operator")).toBe(false);
       await engine.stop();
     });
   });

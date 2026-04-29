@@ -24,7 +24,6 @@ export class EphemeralListener {
       fire: "onFire",
       resolved: "onResolved",
       ack: "onAck",
-      ack_all: "onAckAll",
     };
 
     this.#alertConsumer = await this.#ctx.jetstream.consumers.get(

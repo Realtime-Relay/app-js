@@ -316,15 +316,6 @@ describe("AlertManager", () => {
     });
   });
 
-  describe("ackAll", () => {
-    it("sends ack_all request", async () => {
-      const ctx = makeCtx();
-      const am = new AlertManager(ctx);
-      const result = await am.ackAll({ alert_id: "rule_1", acked_by: "op" });
-      expect(result).toBe(true);
-    });
-  });
-
   describe("mute", () => {
     it("sends mute request with FOREVER", async () => {
       const ctx = makeCtx();

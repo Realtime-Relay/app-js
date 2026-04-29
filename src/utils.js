@@ -76,7 +76,6 @@ export async function streamHistory(
   let decoded;
   try {
     decoded = msgpackDecode(res.data);
-    console.log(decoded)
   } catch {
     // Some endpoints reply with JSONCodec on errors, msgpack on success.
     decoded = JSON.parse(new TextDecoder().decode(res.data));

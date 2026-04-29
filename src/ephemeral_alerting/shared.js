@@ -45,15 +45,15 @@ export function resolveIdentFromId(ctx, deviceId) {
   return null;
 }
 
-export function buildAlertPayload(rule, rollingState, timestamp, deviceId) {
+export function buildAlertPayload(rule, rollingState, timestamp, deviceId, incidentId) {
   return {
     alert: {
       id: rule.id,
       name: rule.name,
       type: rule.config.topic.source,
-      config: rule.config,
     },
     device_id: deviceId,
+    incident_id: incidentId ?? null,
     rolling_state: { ...rollingState },
     timestamp,
   };
@@ -82,6 +82,7 @@ export function createFreshState() {
     acked_by: null,
     acked_at: null,
     ack_notes: null,
+    incident_id: null,
   };
 }
 

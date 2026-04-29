@@ -29,6 +29,9 @@ export class EphemeralOwner {
   #heartbeatInterval = null;
   #recoveryInterval = null;
   #lastDataAt = null;
+  // Single rule-global state. Ephemeral alerts run with ONE owner and ONE
+  // user-supplied evaluator that judges the entire rolling state — the
+  // incident is scoped to the rule, not to any specific device.
   #state;
   #running = true;
 
@@ -83,7 +86,11 @@ export class EphemeralOwner {
 
   // ─── Local Ack/AckAll ────────────────────────────────────
 
-  async ack(ackedBy, ackNotes = null) {
+  // Local ack — targets the rule's current incident. State machine is
+  // rule-scoped, but the audit event we publish carries `device_id` so it's
+  // tagged correctly in Influx and shows up in `rule_type: "DEVICE"` history
+  // queries.
+  async ack(deviceId, ackedBy, ackNotes = null) {
     if (this.#state.status !== "alerting") return false;
 
     this.#state.status = "acknowledged";
@@ -93,6 +100,8 @@ export class EphemeralOwner {
 
     const payload = {
       status: "acknowledged",
+      device_id: deviceId,
+      incident_id: this.#state.incident_id,
       ack: {
         acked_by: ackedBy,
         ack_notes: ackNotes,
@@ -104,32 +113,6 @@ export class EphemeralOwner {
 
     if (this.#callbacks.onAck) {
       this.#callbacks.onAck(payload);
-    }
-
-    return true;
-  }
-
-  async ackAll(ackedBy, ackNotes = null) {
-    if (this.#state.status !== "alerting") return false;
-
-    this.#state.status = "acknowledged";
-    this.#state.acked_by = ackedBy;
-    this.#state.acked_at = Date.now();
-    this.#state.ack_notes = ackNotes;
-
-    const payload = {
-      status: "acknowledged",
-      ack: {
-        acked_by: ackedBy,
-        ack_notes: ackNotes,
-        acked_at: this.#state.acked_at,
-      },
-    };
-
-    await publishEvent(this.#ctx, this.#rule, "ack_all", payload);
-
-    if (this.#callbacks.onAckAll) {
-      this.#callbacks.onAckAll(payload);
     }
 
     return true;
@@ -183,9 +166,6 @@ export class EphemeralOwner {
             case "ack":
               this.#handleAckRPC(msg);
               break;
-            case "ack_all":
-              this.#handleAckAllRPC(msg);
-              break;
             case "mute":
               this.#handleMuteRPC(msg);
               break;
@@ -199,6 +179,9 @@ export class EphemeralOwner {
     })();
   }
 
+  // RPC handler for remote ack. State machine is rule-scoped; we forward the
+  // listener-supplied device_id into the audit event so the ack row gets
+  // tagged correctly in Influx.
   #handleAckRPC(msg) {
     const data = msgpackDecode(msg.data);
 
@@ -217,6 +200,7 @@ export class EphemeralOwner {
     const payload = {
       status: "acknowledged",
       device_id: data.device_id,
+      incident_id: this.#state.incident_id,
       ack: {
         acked_by: data.acked_by,
         ack_notes: data.ack_notes || null,
@@ -226,39 +210,6 @@ export class EphemeralOwner {
 
     publishEvent(this.#ctx, this.#rule, "ack", payload);
     if (this.#callbacks.onAck) this.#callbacks.onAck(payload);
-    msg.respond(codec.encode({ status: "ACK_SUCCESS" }));
-  }
-
-  #handleAckAllRPC(msg) {
-    const data = msgpackDecode(msg.data);
-
-    if (this.#state.status !== "alerting") {
-      msg.respond(
-        codec.encode({ status: "ACK_FAILED", reason: "not in alerting state" }),
-      );
-      return;
-    }
-
-    this.#state.status = "acknowledged";
-    this.#state.acked_by = data.acked_by;
-    this.#state.acked_at = Date.now();
-    this.#state.ack_notes = data.ack_notes || null;
-
-    const payload = {
-      status: "acknowledged",
-      ack: {
-        acked_by: data.acked_by,
-        ack_notes: data.ack_notes || null,
-        acked_at: this.#state.acked_at,
-      },
-    };
-
-    publishEvent(this.#ctx, this.#rule, "ack_all", payload);
-
-    if (this.#callbacks.onAckAll) {
-      this.#callbacks.onAckAll(payload);
-    }
-
     msg.respond(codec.encode({ status: "ACK_SUCCESS" }));
   }
 
@@ -381,8 +332,10 @@ export class EphemeralOwner {
       const heldFor = now - this.#state.breached_since;
 
       if (this.#state.status === "normal" && heldFor >= durationMs) {
+        // Open a new incident on every normal → alerting transition.
         this.#state.status = "alerting";
         this.#state.last_fired = now;
+        this.#state.incident_id = crypto.randomUUID();
 
         await this.#publishFire(now, deviceId);
 
@@ -393,13 +346,20 @@ export class EphemeralOwner {
             config: this.#rule.config,
           },
           device_id: deviceId,
+          incident_id: this.#state.incident_id,
           last_value: this.#rollingState,
           timestamp: Date.now(),
         });
 
         if (this.#callbacks.onFire) {
           this.#callbacks.onFire(
-            buildAlertPayload(this.#rule, this.#rollingState, now, deviceId),
+            buildAlertPayload(
+              this.#rule,
+              this.#rollingState,
+              now,
+              deviceId,
+              this.#state.incident_id,
+            ),
           );
         }
       } else if (
@@ -417,17 +377,32 @@ export class EphemeralOwner {
             config: this.#rule.config,
           },
           device_id: deviceId,
+          incident_id: this.#state.incident_id,
           last_value: this.#rollingState,
           timestamp: Date.now(),
         });
 
         if (this.#callbacks.onFire) {
           this.#callbacks.onFire(
-            buildAlertPayload(this.#rule, this.#rollingState, now, deviceId),
+            buildAlertPayload(
+              this.#rule,
+              this.#rollingState,
+              now,
+              deviceId,
+              this.#state.incident_id,
+            ),
           );
         }
+      } else if (
+        this.#state.status === "acknowledged" &&
+        now - this.#state.last_fired >= cooldownMs
+      ) {
+        // Audit-only fire — incident is acked, suppress notification AND
+        // skip the onFire callback. The export event still goes out so the
+        // server-side audit log shows the breach is ongoing.
+        this.#state.last_fired = now;
+        await this.#publishFire(now, deviceId);
       }
-      // acknowledged → silent
     } else {
       this.#state.breached_since = null;
 
@@ -442,7 +417,11 @@ export class EphemeralOwner {
           this.#state.status === "acknowledged") &&
         clearedFor >= recoveryMs
       ) {
-        await this.#publishResolved(now, deviceId);
+        // Capture closing incident_id BEFORE clearing so the resolved
+        // event ties to the correct incident.
+        const closingIncidentId = this.#state.incident_id;
+
+        await this.#publishResolved(now, deviceId, closingIncidentId);
 
         await dispatchNotifications(this.#ctx, this.#rule, {
           alert: {
@@ -451,13 +430,20 @@ export class EphemeralOwner {
             config: this.#rule.config,
           },
           device_id: "",
+          incident_id: closingIncidentId,
           last_value: this.#rollingState,
           timestamp: Date.now(),
         });
 
         if (this.#callbacks.onResolved) {
           this.#callbacks.onResolved(
-            buildAlertPayload(this.#rule, this.#rollingState, now, deviceId),
+            buildAlertPayload(
+              this.#rule,
+              this.#rollingState,
+              now,
+              deviceId,
+              closingIncidentId,
+            ),
           );
         }
 
@@ -467,6 +453,7 @@ export class EphemeralOwner {
         this.#state.ack_notes = null;
         this.#state.breached_since = null;
         this.#state.clear_since = null;
+        this.#state.incident_id = null;
       }
     }
 
@@ -478,16 +465,28 @@ export class EphemeralOwner {
       this.#ctx,
       this.#rule,
       "fire",
-      buildAlertPayload(this.#rule, this.#rollingState, timestamp, deviceId),
+      buildAlertPayload(
+        this.#rule,
+        this.#rollingState,
+        timestamp,
+        deviceId,
+        this.#state.incident_id,
+      ),
     );
   }
 
-  async #publishResolved(timestamp, deviceId) {
+  async #publishResolved(timestamp, deviceId, incidentId) {
     await publishEvent(
       this.#ctx,
       this.#rule,
       "resolved",
-      buildAlertPayload(this.#rule, this.#rollingState, timestamp, deviceId),
+      buildAlertPayload(
+        this.#rule,
+        this.#rollingState,
+        timestamp,
+        deviceId,
+        incidentId ?? this.#state.incident_id,
+      ),
     );
   }
 
@@ -590,11 +589,13 @@ export class EphemeralOwner {
       const silenceMs = now - this.#lastDataAt;
 
       if (silenceMs >= recoveryMs) {
+        const closingIncidentId = this.#state.incident_id;
         const resolvedPayload = buildAlertPayload(
           this.#rule,
           this.#rollingState,
           now,
           "",
+          closingIncidentId,
         );
         await publishEvent(this.#ctx, this.#rule, "resolved", resolvedPayload);
 
@@ -605,6 +606,7 @@ export class EphemeralOwner {
             config: this.#rule.config,
           },
           device_id: "",
+          incident_id: closingIncidentId,
           last_value: this.#rollingState,
           timestamp: now,
         });
@@ -619,6 +621,7 @@ export class EphemeralOwner {
         this.#state.ack_notes = null;
         this.#state.breached_since = null;
         this.#state.clear_since = null;
+        this.#state.incident_id = null;
       }
     }, tickMs);
   }

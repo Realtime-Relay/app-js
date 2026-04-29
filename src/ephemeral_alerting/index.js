@@ -60,14 +60,9 @@ export class EphemeralEngine {
     this.#mode = null;
   }
 
-  async ack(ackedBy, ackNotes = null) {
+  async ack(deviceId, ackedBy, ackNotes = null) {
     if (!this.#delegate?.ack) return false;
-    return this.#delegate.ack(ackedBy, ackNotes);
-  }
-
-  async ackAll(ackedBy, ackNotes = null) {
-    if (!this.#delegate?.ackAll) return false;
-    return this.#delegate.ackAll(ackedBy, ackNotes);
+    return this.#delegate.ack(deviceId, ackedBy, ackNotes);
   }
 
   // ─── Getters ─────────────────────────────────────────────
