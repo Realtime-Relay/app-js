@@ -10,7 +10,9 @@ import {
   validateConnected,
   validateISO8601,
   validateObject,
+  validateFunction,
 } from "./validation.js";
+import { streamHistory } from "./utils.js";
 
 export class CommandManager {
   #ctx;
@@ -62,6 +64,19 @@ export class CommandManager {
     return result;
   }
 
+  /**
+   * Fetch historical command invocations over the streaming protocol.
+   *
+   * params:
+   *   name           string   required, the command name
+   *   device_idents  string[] required
+   *   start, end     ISO8601 (end optional, defaults to now)
+   *   interval, aggregate_fn  optional bucketing
+   *   onFrame        function? live frame callback
+   *
+   * Returns: { <device_ident>: [{value, timestamp}, ...] }
+   * Devices that couldn't be resolved appear as { error: "Device not found" }.
+   */
   async history(params) {
     validateConnected(this.#ctx.connected);
     validateCommandName(params.name);
@@ -73,89 +88,68 @@ export class CommandManager {
     }
 
     const end = params.end || new Date().toISOString();
+    if (params.end) validateISO8601(params.end, "end");
 
-    if (params.end) {
-      validateISO8601(params.end, "end");
+    if (params.onFrame !== undefined) {
+      validateFunction(params.onFrame, "onFrame");
     }
 
-    // Resolve each ident individually to track found/unfound and build id→ident map
+    // Resolve each ident → id, tracking unfound for the result.
     const idToIdent = {};
     const deviceIds = [];
-    const unfound = [];
+    const commandHistory = {};
 
     for (const ident of params.device_idents) {
+      commandHistory[ident] = [];
       try {
         const id = await this.#ctx.device.resolveDeviceId(ident);
         deviceIds.push(id);
         idToIdent[id] = ident;
       } catch {
-        unfound.push(ident);
+        commandHistory[ident] = { error: "Device not found" };
       }
     }
 
     if (deviceIds.length === 0) {
-      const result = {};
-      for (const ident of unfound) {
-        result[ident] = { error: "Device not found" };
-      }
-      return result;
+      return commandHistory;
     }
 
-    var res = null;
-    var commandHistory = {};
-    var startCursor = params.start;
+    const payload = {
+      device_ids: deviceIds,
+      env: this.#ctx.env,
+      command_name: params.name,
+      start: params.start,
+      end,
+    };
+    if (params.interval) payload.interval = params.interval;
+    if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    for (let ident of params.device_idents) {
-      commandHistory[ident] = [];
+    const result = await streamHistory(
+      this.#ctx,
+      `api.iot.db.${this.#ctx.orgID}.command.history`,
+      payload,
+      { onFrame: params.onFrame },
+    );
+
+    if (result.error) {
+      throw new Error(
+        `Command history failed: ${result.errorMessage ?? result.status}`,
+      );
     }
 
-    while (true) {
-      try {
-        res = await this.#ctx.natsClient.request(
-          `api.iot.db.${this.#ctx.orgID}.command.history`,
-          this.#codec.encode({
-            device_ids: deviceIds,
-            env: this.#ctx.env,
-            command_name: params.name,
-            start: startCursor,
-            end,
-          }),
-          { timeout: 20000 },
-        );
-
-        const decoded = msgpackDecode(res.data);
-
-        if (decoded.status == "COMMAND_FETCH_SUCCESS") {
-          var data = decoded.data;
-
-          var hasMore = data.has_more;
-
-          var commandPage = data.data;
-
-          for (const [deviceId, records] of Object.entries(commandPage)) {
-            const ident = idToIdent[deviceId] || deviceId;
-
-            commandHistory[ident] = commandHistory[ident].concat(records);
-          }
-
-          if (hasMore) {
-            startCursor = data.cursor;
-
-            continue;
-          } else {
-            // We got all the data, we're done
-
-            break;
-          }
-        } else {
-          // We weren't able to fetch command history
-
-          break;
+    // Each frame: { last, data: { <device_id>: { value, timestamp } } }
+    for (const frame of result.frames) {
+      if (!frame.data) continue;
+      for (const [deviceId, point] of Object.entries(frame.data)) {
+        const ident = idToIdent[deviceId] || deviceId;
+        if (!Array.isArray(commandHistory[ident])) {
+          // Was marked unfound — but the device id resolved on the server.
+          commandHistory[ident] = [];
         }
-      } catch (err) {
-        console.error("Command history request failed", err);
-
-        throw new Error("Command history request timed-out");
+        commandHistory[ident].push({
+          value: point.value,
+          timestamp: point.timestamp,
+        });
       }
     }
 

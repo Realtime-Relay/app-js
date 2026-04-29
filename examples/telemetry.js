@@ -5,7 +5,7 @@ import { writeFileSync } from "fs";
 const app = new RelayApp({
   api_key: process.env.RELAY_API_KEY,
   secret: process.env.RELAY_SECRET,
-  mode: "test",
+  mode: "production",
 });
 
 app.connection.listeners((event) => {
@@ -51,7 +51,7 @@ async function run() {
         continue;
       }
 
-      const data = await app.telemetry.latest({
+      const data = await app.telemetry.history({
         device_ident: ident,
         fields,
         start: "2025-01-01T00:00:00.000Z",

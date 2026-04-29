@@ -5,6 +5,7 @@ import { RPCManager } from "./rpc.js";
 import { DeviceManager } from "./device.js";
 import { EventManager } from "./events.js";
 import { AlertManager } from "./alerts.js";
+import { LogManager } from "./logs.js";
 import { LogicalGroupManager } from "./logicalGroup.js";
 import { HeirarchyGroupManager } from "./heirarchyGroup.js";
 import { NotificationManager } from "./notifications.js";
@@ -108,6 +109,7 @@ export class RelayApp {
     this.rpc = new RPCManager(ctx);
     this.events = new EventManager(ctx);
     this.alert = new AlertManager(ctx);
+    this.log = new LogManager(ctx);
     this.logicalGroup = new LogicalGroupManager(ctx);
     this.heirarchyGroup = new HeirarchyGroupManager(ctx);
     this.notification = new NotificationManager(ctx);

@@ -12,6 +12,7 @@ import {
   validateStartBeforeEnd,
   validateNonEmptyArray,
 } from "./validation.js";
+import { streamHistory } from "./utils.js";
 
 export class TelemetryManager {
   #ctx;
@@ -140,6 +141,20 @@ export class TelemetryManager {
 
   // ─── History ─────────────────────────────────────────────
 
+  /**
+   * Fetch historical telemetry over the streaming protocol.
+   *
+   * params:
+   *   device_ident   string  required
+   *   fields         string[] required (must exist on device schema)
+   *   start, end     ISO8601 required
+   *   interval       string?  optional Flux duration ("30s", "5m", "1h")
+   *   aggregate_fn   string?  optional, paired with interval
+   *                            (mean|min|max|sum|count|first|last|median|stddev)
+   *   onFrame        function? called with each frame as it arrives (live mode)
+   *
+   * Returns: { <metric>: [{value, timestamp}, ...] } — aggregated from all frames.
+   */
   async history(params) {
     validateConnected(this.#ctx.connected);
     validateIdent(params.device_ident, "device_ident");
@@ -151,72 +166,65 @@ export class TelemetryManager {
     validateISO8601(params.end, "end");
     validateStartBeforeEnd(params.start, params.end);
 
+    if (params.onFrame !== undefined) {
+      validateFunction(params.onFrame, "onFrame");
+    }
+
     const deviceId = await this.#ctx.device.resolveDeviceId(
       params.device_ident,
     );
 
-    var res = null;
+    const payload = {
+      device_id: deviceId,
+      env: this.#ctx.env,
+      start: params.start,
+      end: params.end,
+      fields: params.fields,
+      last_value: false,
+    };
+    if (params.interval) payload.interval = params.interval;
+    if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    var startCursor = params.start;
-    var telemetry = {};
+    const result = await streamHistory(
+      this.#ctx,
+      `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+      payload,
+      { onFrame: params.onFrame },
+    );
 
-    for (let field of params.fields) {
+    if (result.error) {
+      throw new Error(
+        `Telemetry history failed: ${result.errorMessage ?? result.status}`,
+      );
+    }
+
+    // Aggregate frames into the legacy { metric: [...] } shape.
+    const telemetry = {};
+    for (const field of params.fields) {
       telemetry[field] = [];
     }
 
-    while (true) {
-      try {
-        res = await this.#ctx.natsClient.request(
-          `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
-          this.#codec.encode({
-            device_id: deviceId,
-            env: this.#ctx.env,
-            start: startCursor,
-            end: params.end,
-            fields: params.fields,
-            last_value: false,
-          }),
-          { timeout: 20000 },
-        );
-
-        res = msgpackDecode(res.data);
-
-        if (res.status == "TELEMETRY_FETCH_SUCCESS") {
-          var data = res.data;
-
-          var hasMore = data.has_more;
-
-          var telemetryPage = data.data;
-
-          for (let metric of Object.keys(telemetryPage)) {
-            telemetry[metric] = telemetry[metric].concat(telemetryPage[metric]);
-          }
-
-          if (hasMore) {
-            startCursor = data.cursor;
-
-            continue;
-          } else {
-            // We got all the data, we're done
-
-            break;
-          }
-        } else {
-          // We weren't able to fetch tlm
-
-          break;
-        }
-      } catch (err) {
-        console.log(err);
-        this.#ctx.logger.error("Telemetry history request failed", err);
-
-        throw new Error("Telemetry history request timed-out");
+    for (const frame of result.frames) {
+      if (!frame.data) continue;
+      
+      for (const [metric, point] of Object.entries(frame.data)) {
+        if (!telemetry[metric]) telemetry[metric] = [];
+        
+        telemetry[metric].push({
+          value: point.value,
+          timestamp: point.timestamp,
+        });
       }
     }
 
     return telemetry;
   }
 
+  /**
+   * Latest reading per metric over a time window. Returns
+   *   { <metric>: { value, timestamp } }
+   * The server returns a single frame containing one entry per metric.
+   */
   async latest(params) {
     validateConnected(this.#ctx.connected);
     validateIdent(params.device_ident, "device_ident");
@@ -232,40 +240,37 @@ export class TelemetryManager {
       params.device_ident,
     );
 
-    var res = null;
+    const result = await streamHistory(
+      this.#ctx,
+      `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+      {
+        device_id: deviceId,
+        env: this.#ctx.env,
+        start: params.start,
+        end: params.end,
+        fields: params.fields,
+        last_value: true,
+      },
+    );
 
-    try {
-      res = await this.#ctx.natsClient.request(
-        `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
-        this.#codec.encode({
-          device_id: deviceId,
-          env: this.#ctx.env,
-          start: params.start,
-          end: params.end,
-          fields: params.fields,
-          last_value: true,
-        }),
-        { timeout: 20000 },
+    if (result.error) {
+      throw new Error(
+        `Telemetry latest failed: ${result.errorMessage ?? result.status}`,
       );
-
-      res = msgpackDecode(res.data);
-    } catch (err) {
-      this.#ctx.logger.error("Telemetry history request failed", err);
-
-      throw new Error("Telemetry history request timed-out");
     }
 
-    var latestValues = {};
+    // last_value mode emits exactly one frame containing all metrics' last
+    // readings (or zero frames if there's no data at all).
+    const latest = {};
+    if (result.frames.length === 0) return latest;
 
-    if (res.status == "TELEMETRY_FETCH_SUCCESS") {
-      var data = res.data.data;
-
-      for (let key of Object.keys(data)) {
-        latestValues[key] = data[key][0];
+    const onlyFrame = result.frames[0];
+    if (onlyFrame?.data) {
+      for (const [metric, point] of Object.entries(onlyFrame.data)) {
+        latest[metric] = { value: point.value, timestamp: point.timestamp };
       }
     }
-
-    return latestValues;
+    return latest;
   }
 
   // ─── Validation ──────────────────────────────────────────
