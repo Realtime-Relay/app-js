@@ -23,8 +23,10 @@ export class AlertManager {
   #ctx;
   #codec = JSONCodec();
   #listenConsumers = new Map(); // ruleId -> consumer[]
+  #streamConsumers = new Map(); // token -> consumer[] (from .stream() — one consumer per filter_subject)
   #ephemeralEngines = new Map(); // ruleId -> EphemeralEngine
-  #alertMetadata = new Map(); // alertId -> { type, ... }
+  #alertMetadata = new Map(); // alertId -> { type, rule }
+  #refreshing = null;          // de-dupes concurrent list() refreshes triggered by getById()
 
   constructor(ctx) {
     this.#ctx = ctx;
@@ -53,7 +55,7 @@ export class AlertManager {
 
     // Track metadata
     if (data.id) {
-      this.#alertMetadata.set(data.id, { type: data.type || "THRESHOLD" });
+      this.#alertMetadata.set(data.id, { type: data.type || "THRESHOLD", rule: data });
     }
 
     alert.listen = async (callbacks) => {
@@ -76,7 +78,7 @@ export class AlertManager {
 
     // Track metadata
     if (data.id) {
-      this.#alertMetadata.set(data.id, { type: "EPHEMERAL" });
+      this.#alertMetadata.set(data.id, { type: "EPHEMERAL", rule: data });
     }
 
     const engine = new EphemeralEngine(this.#ctx, data);
@@ -239,7 +241,7 @@ export class AlertManager {
     // Track metadata for all listed alerts
     for (const a of alerts) {
       if (a.id) {
-        this.#alertMetadata.set(a.id, { type: a.type || "THRESHOLD" });
+        this.#alertMetadata.set(a.id, { type: a.type || "THRESHOLD", rule: a });
       }
     }
 
@@ -258,6 +260,7 @@ export class AlertManager {
     if (res.data.id) {
       this.#alertMetadata.set(res.data.id, {
         type: res.data.type || "THRESHOLD",
+        rule: res.data,
       });
     }
 
@@ -267,6 +270,43 @@ export class AlertManager {
     }
 
     return this.#wrapAlert(res.data);
+  }
+
+  // ─── Cache lookup by ID ──────────────────────────────────
+
+  /**
+   * Returns the cached rule for `ruleId`, or `null` if not present.
+   * Synchronous — no network. Useful inside tight callbacks (e.g. an alert
+   * event listener) where the cache has already been warmed via `list()`.
+   */
+  getCachedById(ruleId) {
+    return this.#alertMetadata.get(ruleId)?.rule ?? null;
+  }
+
+  /**
+   * Returns the rule for `ruleId`. On a cache miss, refreshes the cache
+   * via `list()` once (concurrent calls share the in-flight refresh), then
+   * tries again. Returns `null` if the rule still cannot be found.
+   *
+   * Use this in alert-event listeners that subscribe to a wildcard subject
+   * — when an event for a previously-unseen rule arrives, the cache will
+   * self-heal on first access.
+   */
+  async getById(ruleId) {
+    validateConnected(this.#ctx.connected);
+    if (!ruleId) throw new Error("ruleId is required");
+
+    const hit = this.#alertMetadata.get(ruleId);
+    if (hit?.rule) return hit.rule;
+
+    if (!this.#refreshing) {
+      this.#refreshing = this.list().finally(() => {
+        this.#refreshing = null;
+      });
+    }
+    await this.#refreshing;
+
+    return this.#alertMetadata.get(ruleId)?.rule ?? null;
   }
 
   // ─── History ──────────────────────────────────────────────
@@ -542,6 +582,226 @@ export class AlertManager {
     this.#listenConsumers.set(ruleId, [consumer]);
   }
 
+  // ─── Global stream (all rules, with optional filters) ────
+
+  /**
+   * Subscribe to alert lifecycle events (fire / resolved / ack) across ALL
+   * rules in the org, with optional client-side filters. To stop, call the
+   * returned `off()`.
+   *
+   * Two JetStream consumers are created per call — one per filter_subject —
+   * so each consumer carries a single subject filter that the org's
+   * permission policy can match cleanly:
+   *   - import.{orgID}.{env}.alerts.listen.*.*   (backend-emitted events)
+   *   - {orgID}.{env}.alerts.listen.*.*           (ephemeral owner-emitted events)
+   * The two streams share one in-process callback path, so consumers see a
+   * single merged event feed.
+   *
+   * Filters are AND-combined. All optional. If a filter is omitted, that
+   * dimension is unrestricted.
+   *
+   *   filters: {
+   *     ruleIds:       string[]   — match by rule id (extracted from subject)
+   *     deviceIdents:  string[]   — match against payload `device_id`,
+   *                                  resolved from idents via the device cache
+   *     groupIds:      string[]   — match `rule.config.scope.value` when
+   *                                  `scope.type` is LOGICAL_GROUP or HEIRARCHY
+   *   }
+   *
+   * The callback receives a uniform AlertStreamEvent for every state:
+   *   {
+   *     state:         "fire" | "resolved" | "ack",
+   *     rule_id:       string,
+   *     rule_name:     string,
+   *     rule_type:     "THRESHOLD" | "RATE_CHANGE" | "EPHEMERAL",
+   *     device_id:     string,                          // "" on resolved
+   *     device_ident:  string | undefined,              // reverse-resolved via device cache
+   *     incident_id:   string | null,
+   *     timestamp:     number,                          // unix ms
+   *     rolling_state?: any,                            // present on fire/resolved (post-migration)
+   *     last_value?:   any,                             // present on fire/resolved (pre-migration backend)
+   *     ack?:          { acked_by, acked_at, ack_notes } // present on ack
+   *   }
+   *
+   * @returns {Promise<{ off: () => Promise<void> }>}
+   */
+  async stream({ filters = {}, callback } = {}) {
+    validateConnected(this.#ctx.connected);
+    validateFunction(callback, "callback");
+
+    if (filters.ruleIds !== undefined && !Array.isArray(filters.ruleIds)) {
+      throw new Error("filters.ruleIds must be an array");
+    }
+    if (
+      filters.deviceIdents !== undefined &&
+      !Array.isArray(filters.deviceIdents)
+    ) {
+      throw new Error("filters.deviceIdents must be an array");
+    }
+    if (filters.groupIds !== undefined && !Array.isArray(filters.groupIds)) {
+      throw new Error("filters.groupIds must be an array");
+    }
+
+    const ruleIdSet =
+      filters.ruleIds && filters.ruleIds.length > 0
+        ? new Set(filters.ruleIds)
+        : null;
+    const groupIdSet =
+      filters.groupIds && filters.groupIds.length > 0
+        ? new Set(filters.groupIds)
+        : null;
+
+    // Resolve device idents up-front so we can match payload `device_id`
+    // server-side IDs against caller-provided idents.
+    let deviceIdSet = null;
+    if (filters.deviceIdents && filters.deviceIdents.length > 0) {
+      deviceIdSet = new Set();
+      for (const ident of filters.deviceIdents) {
+        validateIdent(ident, "filters.deviceIdents[]");
+        try {
+          const id = await this.#ctx.device.resolveDeviceId(ident);
+          deviceIdSet.add(id);
+        } catch {
+          // Unfound idents silently drop; nothing to match against.
+        }
+      }
+    }
+
+    const orgID = this.#ctx.orgID;
+    const env = this.#ctx.env;
+
+    // Two separate filter_subject (singular) values, one consumer each, so
+    // each consumer's permission scope matches a single concrete subject.
+    const filterSubjects = [
+      `import.${orgID}.${env}.alerts.listen.*.*`,
+      `${orgID}.${env}.alerts.listen.*.*`,
+    ];
+
+    const token = `appjs_alert_stream_${crypto.randomUUID()}`;
+
+    // Reverse device_id → ident lookup using the SDK's device cache.
+    const reverseIdent = (deviceId) => {
+      if (!deviceId) return undefined;
+      for (const [ident, dev] of this.#ctx.device.cache) {
+        if (dev?.id === deviceId) return ident;
+      }
+      return undefined;
+    };
+
+    const handleMessage = async (msg) => {
+      msg.working();
+      try {
+        const data = msgpackDecode(msg.data);
+        msg.ack();
+
+        const tokens = msg.subject.split(".");
+        const ruleId = tokens[tokens.length - 2];
+        const state = tokens[tokens.length - 1];
+
+        if (!VALID_ALERT_STATES.includes(state)) return;
+
+        // Rule filter (cheap subject-based check first).
+        if (ruleIdSet && !ruleIdSet.has(ruleId)) return;
+
+        // Look up rule (cache hit normally; auto-refreshes on miss).
+        const rule = await this.getById(ruleId);
+        if (!rule) return;
+
+        // Group filter — only meaningful for LOGICAL_GROUP / HEIRARCHY scopes.
+        if (groupIdSet) {
+          const scope = rule.config?.scope;
+          if (!scope) return;
+          if (scope.type !== "LOGICAL_GROUP" && scope.type !== "HEIRARCHY")
+            return;
+          if (!groupIdSet.has(scope.value)) return;
+        }
+
+        // Device filter — payload's device_id is server-side. resolved
+        // events have device_id="" since they aren't tied to one device.
+        const eventDeviceId = data.device_id ?? "";
+        if (deviceIdSet) {
+          if (!eventDeviceId || !deviceIdSet.has(eventDeviceId)) return;
+        }
+
+        const deviceIdent = reverseIdent(eventDeviceId);
+
+        // Build the uniform event payload (snake_case to match SDK convention).
+        const event = {
+          state,
+          rule_id: ruleId,
+          rule_name: rule.name,
+          rule_type: rule.type || "THRESHOLD",
+          device_id: eventDeviceId,
+          device_ident: deviceIdent,
+          incident_id: data.incident_id ?? null,
+          timestamp:
+            typeof data.timestamp === "number"
+              ? data.timestamp
+              : (data.ack?.acked_at ?? Date.now()),
+        };
+
+        if (state === "ack" && data.ack) {
+          event.ack = {
+            acked_by: data.ack.acked_by,
+            acked_at: data.ack.acked_at,
+            ack_notes: data.ack.ack_notes ?? null,
+          };
+        } else if (data.rolling_state) {
+          // Spec shape (ephemeral + post-migration backend).
+          event.rolling_state = data.rolling_state;
+        } else if (data.last_value !== undefined) {
+          // Backwards compat: pre-migration backend events publish
+          // last_value: { value, field_name } instead of rolling_state.
+          event.last_value = data.last_value;
+        }
+
+        callback(event);
+      } catch (err) {
+        // A bad message must not blow up either consumer.
+        // eslint-disable-next-line no-console
+        console.error("[alert.stream] callback error", err);
+      }
+    };
+
+    // Create the two consumers in parallel.
+    const consumers = await Promise.all(
+      filterSubjects.map((subject, i) =>
+        this.#ctx.jetstream.consumers.get(`${orgID}_stream`, {
+          name: `${token}_${i}`,
+          filter_subjects: subject,
+          replay_policy: "instant",
+          opt_start_time: new Date(),
+          ack_policy: "explicit",
+          delivery_policy: "new",
+        }),
+      ),
+    );
+
+    // Start consuming on both. consume() doesn't resolve, so don't await.
+    for (const consumer of consumers) {
+      consumer.consume({ callback: handleMessage });
+    }
+
+    this.#streamConsumers.set(token, consumers);
+
+    return {
+      off: async () => {
+        const list = this.#streamConsumers.get(token);
+        if (!list) return;
+        this.#streamConsumers.delete(token);
+        await Promise.all(
+          list.map(async (c) => {
+            try {
+              await c.delete();
+            } catch {
+              /* swallow — best-effort cleanup */
+            }
+          }),
+        );
+      },
+    };
+  }
+
   #transformTimestamp(data) {
     const transformed = { ...data };
 
@@ -561,6 +821,17 @@ export class AlertManager {
       }
     }
     this.#listenConsumers.clear();
+
+    for (const [, consumers] of this.#streamConsumers) {
+      for (const consumer of consumers) {
+        try {
+          await consumer.delete();
+        } catch {
+          /* swallow — best-effort cleanup */
+        }
+      }
+    }
+    this.#streamConsumers.clear();
 
     for (const [, engine] of this.#ephemeralEngines) {
       await engine.stop();
