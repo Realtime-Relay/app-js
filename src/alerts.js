@@ -16,7 +16,7 @@ import { EphemeralEngine } from "./ephemeral_alerting/index.js";
 import { streamHistory } from "./utils.js";
 
 const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
-const VALID_RULE_TYPES = ["DEVICE", "RULE"];
+const VALID_RULE_TYPES = ["DEVICE", "RULE", "ORG"];
 const VALID_ALERT_STATES = ["fire", "resolved", "ack"];
 
 export class AlertManager {
@@ -333,13 +333,35 @@ export class AlertManager {
 
     if (!params.rule_type) throw new Error("rule_type is required");
     if (!VALID_RULE_TYPES.includes(params.rule_type)) {
-      throw new Error("rule_type must be DEVICE or RULE");
+      throw new Error("rule_type must be DEVICE, RULE, or ORG");
     }
-    if (params.rule_type === "DEVICE" && !params.device_ident) {
-      throw new Error("device_ident is required for rule_type DEVICE");
+    // Companion-field rules per rule_type:
+    //   DEVICE → require device_ident (single) or device_idents (array)
+    //   RULE   → require rule_id; device_ident(s) optional (narrows)
+    //   ORG    → no required companion; device_idents and rule_id both optional
+    if (params.rule_type === "DEVICE") {
+      const hasSingle = !!params.device_ident;
+      const hasArray =
+        Array.isArray(params.device_idents) && params.device_idents.length > 0;
+      if (!hasSingle && !hasArray) {
+        throw new Error(
+          "device_ident or device_idents is required for rule_type DEVICE",
+        );
+      }
     }
     if (params.rule_type === "RULE" && !params.rule_id) {
       throw new Error("rule_id is required for rule_type RULE");
+    }
+    if (params.device_idents !== undefined) {
+      if (
+        !Array.isArray(params.device_idents) ||
+        params.device_idents.length === 0
+      ) {
+        throw new Error("device_idents must be a non-empty array of strings");
+      }
+      for (const ident of params.device_idents) {
+        validateIdent(ident, "device_idents[]");
+      }
     }
 
     if (params.rule_states) {
@@ -374,9 +396,20 @@ export class AlertManager {
       end: params.end,
     };
 
+    // Resolve idents to ids in parallel. Both `device_ident` (single) and
+    // `device_idents` (array) are accepted; the array form is forwarded to
+    // the backend as `device_ids`. Single-ident callers continue to receive
+    // the legacy `device_id` field for backwards compat.
     if (params.device_ident) {
       payload.device_id = await this.#ctx.device.resolveDeviceId(
         params.device_ident,
+      );
+    }
+    if (Array.isArray(params.device_idents) && params.device_idents.length > 0) {
+      payload.device_ids = await Promise.all(
+        params.device_idents.map((ident) =>
+          this.#ctx.device.resolveDeviceId(ident),
+        ),
       );
     }
     if (params.rule_type === "RULE") payload.rule_id = params.rule_id;
@@ -397,8 +430,10 @@ export class AlertManager {
       );
     }
 
-    // Each frame: { last, data: { <state>: { value, timestamp, incident_id } } }
-    // Flatten into a chronological event list.
+    // Each frame: { last, data: { <state>: { value, timestamp, incident_id, rule_id, device_id } } }
+    // Flatten into a chronological event list. rule_id and device_id come from
+    // the row tags (added in the iterator) and are populated for org-wide
+    // queries where the caller doesn't already know which rule/device emitted.
     const events = [];
     for (const frame of result.frames) {
       if (!frame.data) continue;
@@ -408,6 +443,8 @@ export class AlertManager {
           value: point.value,
           timestamp: point.timestamp,
           incident_id: point.incident_id ?? null,
+          rule_id: point.rule_id ?? null,
+          device_id: point.device_id ?? null,
         });
       }
     }

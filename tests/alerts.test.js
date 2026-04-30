@@ -504,10 +504,10 @@ describe("AlertManager", () => {
           start: validStart,
           end: validEnd,
         }),
-      ).rejects.toThrow("DEVICE or RULE");
+      ).rejects.toThrow("DEVICE, RULE, or ORG");
     });
 
-    it("throws if DEVICE but no device_ident", async () => {
+    it("throws if DEVICE but no device_ident or device_idents", async () => {
       const ctx = makeCtx();
       const am = new AlertManager(ctx);
 
@@ -518,7 +518,7 @@ describe("AlertManager", () => {
           start: validStart,
           end: validEnd,
         }),
-      ).rejects.toThrow("device_ident is required");
+      ).rejects.toThrow("device_ident or device_idents is required");
     });
 
     it("throws if RULE but no rule_id", async () => {
