@@ -24,8 +24,6 @@ console.log(`Range: ${oneWeekAgo.toISOString()} → ${now.toISOString()}\n`);
 
 try {
   const deviceHistory = await app.alert.history({
-    rule_type: "DEVICE",
-    device_ident: "s-3",
     rule_states: ["fire", "resolved"],
     start: oneWeekAgo.toISOString(),
     end: now.toISOString(),

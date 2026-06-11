@@ -9,6 +9,7 @@ import { LogManager } from "./logs.js";
 import { LogicalGroupManager } from "./logicalGroup.js";
 import { HeirarchyGroupManager } from "./heirarchyGroup.js";
 import { NotificationManager } from "./notifications.js";
+import { OTAManager } from "./ota.js";
 import { decode } from "nats-jwt";
 
 export class RelayApp {
@@ -113,6 +114,7 @@ export class RelayApp {
     this.logicalGroup = new LogicalGroupManager(ctx);
     this.heirarchyGroup = new HeirarchyGroupManager(ctx);
     this.notification = new NotificationManager(ctx);
+    this.ota = new OTAManager(ctx);
 
     this._ctx = ctx; // Exposed for testing only
   }
