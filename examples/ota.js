@@ -64,8 +64,41 @@ try {
   // → firmware upload failed: Firmware version already exists (code: VERSION_EXISTS)
 }
 
-// ── Delete the firmware ──────────────────────────────────────
-// Refused with FIRMWARE_IN_ACTIVE_ROLLOUT while an active rollout uses it.
+// ── Create a DRAFT rollout ───────────────────────────────────
+// Pure intent — no jobs exist yet. device_count is a PREVIEW; the real
+// snapshot happens at activation, against the fleet as it exists then.
+
+const rollout = await app.ota.createRollout({
+  firmware_id: uploaded.firmware_id,
+  request_type: "DOWNLOAD_INSTALL", // or "DOWNLOAD_ONLY" to pre-stage
+  target: { type: "all" }, // or devices (device_ids) / logical_group / hierarchy_group
+  force_install: false,
+  user_config: { apply: "app_gated" },
+});
+console.log(`Draft rollout: ${rollout.rollout_id} → ~${rollout.device_count} devices (preview)`);
+
+// ── Update the draft (anything past DRAFT is immutable) ──────
+
+await app.ota.updateRollout({
+  rollout_id: rollout.rollout_id,
+  request_type: "DOWNLOAD_ONLY",
+});
+console.log("Rollout updated to DOWNLOAD_ONLY");
+
+// ── Activate: THE snapshot moment — jobs created + blast ─────
+
+const active = await app.ota.toggleRollout({
+  rollout_id: rollout.rollout_id,
+  state: "ACTIVE",
+});
+console.log(`Rollout ACTIVE → ${active.device_count} devices snapshotted\n`);
+
+// ── Wind down: stop the rollout, then delete the firmware ────
+// Activated rollouts can't be deleted (permanent history) — STOP them.
+// A STOPPED rollout no longer blocks firmware deletion.
+
+await app.ota.toggleRollout({ rollout_id: rollout.rollout_id, state: "STOPPED" });
+console.log("Rollout stopped (jobs preserved as history)");
 
 const deleted = await app.ota.firmwareDelete({ id: uploaded.firmware_id });
 console.log(`Deleted: ${deleted.firmware_id} (${deleted.deleted})`);
