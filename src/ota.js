@@ -39,6 +39,8 @@ export class OTAManager {
   #token = null;
   #httpUrl = null;
 
+  #jobPhaseSub = null; // live subscription for onJobPhaseUpdate
+
   constructor(ctx) {
     this.#ctx = ctx;
   }
@@ -634,6 +636,43 @@ export class OTAManager {
     );
   }
 
+  // ─── rollout install (install-later) ─────────────────────
+
+  /**
+   * Install-later: nudge devices whose job is DOWNLOADED (image staged via a
+   * DOWNLOAD_ONLY rollout) to install it now, no re-download. Rollout must be
+   * ACTIVE (else ROLLOUT_NOT_LIVE). Non-staged devices are ignored.
+   *
+   * @param {Object}   params
+   * @param {string}   params.rollout_id   Required.
+   * @param {string[]} [params.device_ids] Limit to these staged devices.
+   * @returns {Promise<Object>} { rollout_id, installing }
+   */
+  async installRollout(params) {
+    this.#requireParams(params);
+    this.#requireString(params.rollout_id, "rollout_id");
+
+    const payload = { rollout_id: params.rollout_id };
+
+    if (params.device_ids !== undefined && params.device_ids !== null) {
+      if (
+        !Array.isArray(params.device_ids) ||
+        params.device_ids.length === 0 ||
+        params.device_ids.some((d) => typeof d !== "string" || d.length === 0)
+      ) {
+        throw new Error("device_ids must be a non-empty string array");
+      }
+      payload.device_ids = params.device_ids;
+    }
+
+    return await this.#rolloutRequest(
+      "install",
+      payload,
+      "ROLLOUT_INSTALL_SUCCESS",
+      "rollout install",
+    );
+  }
+
   // ─── rollout list ────────────────────────────────────────
 
   /**
@@ -759,5 +798,47 @@ export class OTAManager {
     }
 
     return reply.data;
+  }
+
+  // ─── live job phase updates ──────────────────────────────
+
+  /**
+   * Subscribe to live job phase updates for every device in the org/env. The
+   * engine publishes each device transition to
+   * import.<org>.<env>.ota.<device_id>.job_phase_update; this subscribes with a
+   * '*' wildcard. Replaces any prior subscription. Returns an unsubscribe fn.
+   *
+   * @param {function} callback ({ rollout_id, device_id, phase, error, ts })
+   * @returns {function} unsubscribe
+   */
+  onJobPhaseUpdate(callback) {
+    validateConnected(this.#ctx.connected);
+    if (typeof callback !== "function") {
+      throw new Error("onJobPhaseUpdate requires a callback function");
+    }
+
+    this.offJobPhaseUpdate(); // one live subscription at a time
+
+    const subject = `import.${this.#ctx.orgID}.${this.#ctx.env}.ota.*.job_phase_update`;
+    this.#jobPhaseSub = this.#ctx.natsClient.subscribe(subject, {
+      callback: (err, msg) => {
+        if (err) return;
+        let update;
+        try {
+          update = this.#codec.decode(msg.data);
+        } catch {
+          return;
+        }
+        callback(update);
+      },
+    });
+
+    return () => this.offJobPhaseUpdate();
+  }
+
+  /** Stop the onJobPhaseUpdate() subscription. No-op if not subscribed. */
+  offJobPhaseUpdate() {
+    this.#jobPhaseSub?.unsubscribe();
+    this.#jobPhaseSub = null;
   }
 }
