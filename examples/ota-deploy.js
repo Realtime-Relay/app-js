@@ -19,8 +19,8 @@ const BIN_PATH =
 
 // MUST match CONFIG_APP_PROJECT_VER of the built bin, AND differ from the
 // version the device is currently running (else the device dedups and skips).
-// Firmware version is UNIQUE PER ORG — bump it every run (or the upload fails
-// with VERSION_EXISTS).
+// Firmware is UNIQUE PER (org, name, version) — reusing the same NAME + VERSION
+// fails with VERSION_EXISTS, so bump VERSION each run (or change NAME below).
 const VERSION = "1.0.1";
 
 // Who gets it. { type: "all" } = every device in the org. To hit one device:
@@ -57,7 +57,7 @@ try {
   // Most common trip-up: re-running without bumping VERSION.
   console.error(`Upload failed: ${err.message} (code: ${err.code ?? "?"})`);
   if (err.code === "VERSION_EXISTS") {
-    console.error("→ bump VERSION (it's unique per org) and rebuild, or delete the old firmware first.");
+    console.error("→ this name + version already exists. Bump VERSION (or change name) and rebuild, or delete the old firmware first.");
   }
   await app.disconnect();
   process.exit(1);
