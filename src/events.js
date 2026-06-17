@@ -8,7 +8,7 @@ import {
   validateISO8601,
   validateStartBeforeEnd,
 } from "./validation.js";
-import { streamHistory } from "./utils.js";
+import { httpHistory } from "./utils.js";
 
 export class EventManager {
   #ctx;
@@ -149,14 +149,13 @@ export class EventManager {
   // ─── History ─────────────────────────────────────────────
 
   /**
-   * Fetch historical events over the streaming protocol.
+   * Fetch historical events from the influx-db-service.
    *
    * params:
    *   device_ident  string   required
    *   event_names   string[] required
    *   start, end    ISO8601  required
    *   interval, aggregate_fn  optional
-   *   onFrame       function? live frame callback
    *
    * Returns: { <event_name>: [{value, timestamp}, ...] }
    */
@@ -170,10 +169,6 @@ export class EventManager {
     validateISO8601(params.start, "start");
     validateISO8601(params.end, "end");
     validateStartBeforeEnd(params.start, params.end);
-
-    if (params.onFrame !== undefined) {
-      validateFunction(params.onFrame, "onFrame");
-    }
 
     const deviceId = await this.#ctx.device.resolveDeviceId(
       params.device_ident,
@@ -189,11 +184,10 @@ export class EventManager {
     if (params.interval) payload.interval = params.interval;
     if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.event.history`,
+      "/iot/db/event/history",
       payload,
-      { onFrame: params.onFrame },
     );
 
     if (result.error) {
@@ -207,9 +201,9 @@ export class EventManager {
       events[name] = [];
     }
 
+    // REST frames are the raw row: { <event_name>: { value, timestamp } }.
     for (const frame of result.frames) {
-      if (!frame.data) continue;
-      for (const [name, point] of Object.entries(frame.data)) {
+      for (const [name, point] of Object.entries(frame)) {
         if (!events[name]) events[name] = [];
         events[name].push({ value: point.value, timestamp: point.timestamp });
       }

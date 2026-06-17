@@ -10,9 +10,8 @@ import {
   validateConnected,
   validateISO8601,
   validateObject,
-  validateFunction,
 } from "./validation.js";
-import { streamHistory } from "./utils.js";
+import { httpHistory } from "./utils.js";
 
 export class CommandManager {
   #ctx;
@@ -65,14 +64,13 @@ export class CommandManager {
   }
 
   /**
-   * Fetch historical command invocations over the streaming protocol.
+   * Fetch historical command invocations from the influx-db-service.
    *
    * params:
    *   name           string   required, the command name
    *   device_idents  string[] required
    *   start, end     ISO8601 (end optional, defaults to now)
    *   interval, aggregate_fn  optional bucketing
-   *   onFrame        function? live frame callback
    *
    * Returns: { <device_ident>: [{value, timestamp}, ...] }
    * Devices that couldn't be resolved appear as { error: "Device not found" }.
@@ -89,10 +87,6 @@ export class CommandManager {
 
     const end = params.end || new Date().toISOString();
     if (params.end) validateISO8601(params.end, "end");
-
-    if (params.onFrame !== undefined) {
-      validateFunction(params.onFrame, "onFrame");
-    }
 
     // Resolve each ident → id, tracking unfound for the result.
     const idToIdent = {};
@@ -124,11 +118,10 @@ export class CommandManager {
     if (params.interval) payload.interval = params.interval;
     if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.command.history`,
+      "/iot/db/command/history",
       payload,
-      { onFrame: params.onFrame },
     );
 
     if (result.error) {
@@ -137,10 +130,9 @@ export class CommandManager {
       );
     }
 
-    // Each frame: { last, data: { <device_id>: { value, timestamp } } }
+    // REST frames are the raw row: { <device_id>: { value, timestamp } }.
     for (const frame of result.frames) {
-      if (!frame.data) continue;
-      for (const [deviceId, point] of Object.entries(frame.data)) {
+      for (const [deviceId, point] of Object.entries(frame)) {
         const ident = idToIdent[deviceId] || deviceId;
         if (!Array.isArray(commandHistory[ident])) {
           // Was marked unfound — but the device id resolved on the server.

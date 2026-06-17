@@ -13,7 +13,7 @@ import {
   validateStartBeforeEnd,
 } from "./validation.js";
 import { EphemeralEngine } from "./ephemeral_alerting/index.js";
-import { streamHistory } from "./utils.js";
+import { httpHistory } from "./utils.js";
 
 const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
 const VALID_RULE_TYPES = ["DEVICE", "RULE", "ORG"];
@@ -312,8 +312,8 @@ export class AlertManager {
   // ─── History ──────────────────────────────────────────────
 
   /**
-   * Fetch alert event history (fire / resolved / ack) over the streaming
-   * protocol. Returns an event timeline ordered by timestamp.
+   * Fetch alert event history (fire / resolved / ack) from the
+   * influx-db-service. Returns an event timeline ordered by timestamp.
    *
    * params:
    *   rule_type      "DEVICE" | "RULE"  required
@@ -324,7 +324,6 @@ export class AlertManager {
    *   start, end     ISO8601 required
    *   interval       string?  paired with aggregate_fn for bucketing
    *   aggregate_fn   "count"? — only "count" allowed for alerts
-   *   onFrame        function? live frame callback
    *
    * Returns: { events: [{state, value, timestamp, incident_id}, ...] }
    */
@@ -384,10 +383,6 @@ export class AlertManager {
     validateISO8601(params.end, "end");
     validateStartBeforeEnd(params.start, params.end);
 
-    if (params.onFrame !== undefined) {
-      validateFunction(params.onFrame, "onFrame");
-    }
-
     const payload = {
       rule_type: params.rule_type,
       env: this.#ctx.env,
@@ -417,11 +412,10 @@ export class AlertManager {
     if (params.interval) payload.interval = params.interval;
     if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.alerts.history`,
+      "/iot/db/alerts/history",
       payload,
-      { onFrame: params.onFrame },
     );
 
     if (result.error) {
@@ -430,14 +424,14 @@ export class AlertManager {
       );
     }
 
-    // Each frame: { last, data: { <state>: { value, timestamp, incident_id, rule_id, device_id } } }
+    // REST frames are the raw row:
+    //   { <state>: { value, timestamp, incident_id, rule_id, device_id } }
     // Flatten into a chronological event list. rule_id and device_id come from
-    // the row tags (added in the iterator) and are populated for org-wide
-    // queries where the caller doesn't already know which rule/device emitted.
+    // the row tags and are populated for org-wide queries where the caller
+    // doesn't already know which rule/device emitted.
     const events = [];
     for (const frame of result.frames) {
-      if (!frame.data) continue;
-      for (const [state, point] of Object.entries(frame.data)) {
+      for (const [state, point] of Object.entries(frame)) {
         events.push({
           state,
           value: point.value,
