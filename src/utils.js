@@ -82,13 +82,13 @@ export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {
   const frames = [];
 
   let offset = 0;
+
+  // Fetch the token once up front; only re-fetch if a page comes back 401/403.
+  let { token, url } = await ensureInfluxAuth(ctx);
   let triedRefresh = false;
 
   while (true) {
-    const { token, url } = await ensureInfluxAuth(ctx);
-
     let res;
-    
     try {
       res = await axios.post(
         `${url}${path}`,
@@ -103,10 +103,10 @@ export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {
       return { error: true, errorMessage, frames };
     }
 
-    // Expired / invalid token: refetch once, then retry the same page.
+    // Token expired / invalid: refresh once, then retry the same page.
     if ((res.status === 401 || res.status === 403) && !triedRefresh) {
       triedRefresh = true;
-      await ensureInfluxAuth(ctx, true);
+      ({ token, url } = await ensureInfluxAuth(ctx, true));
       continue;
     }
 
@@ -127,7 +127,7 @@ export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {
     }
 
     offset = page.next_offset;
-    triedRefresh = false; // a later page may outlive the current token
+    triedRefresh = false; // allow one refresh per page if a long run outlives the token
   }
 
   return { frames };
