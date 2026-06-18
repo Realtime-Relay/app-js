@@ -12,7 +12,7 @@ import {
   validateStartBeforeEnd,
   validateNonEmptyArray,
 } from "./validation.js";
-import { streamHistory } from "./utils.js";
+import { httpHistory } from "./utils.js";
 
 export class TelemetryManager {
   #ctx;
@@ -142,7 +142,7 @@ export class TelemetryManager {
   // ─── History ─────────────────────────────────────────────
 
   /**
-   * Fetch historical telemetry over the streaming protocol.
+   * Fetch historical telemetry from the influx-db-service.
    *
    * params:
    *   device_ident   string  required
@@ -151,7 +151,6 @@ export class TelemetryManager {
    *   interval       string?  optional Flux duration ("30s", "5m", "1h")
    *   aggregate_fn   string?  optional, paired with interval
    *                            (mean|min|max|sum|count|first|last|median|stddev)
-   *   onFrame        function? called with each frame as it arrives (live mode)
    *
    * Returns: { <metric>: [{value, timestamp}, ...] } — aggregated from all frames.
    */
@@ -165,10 +164,6 @@ export class TelemetryManager {
     validateISO8601(params.start, "start");
     validateISO8601(params.end, "end");
     validateStartBeforeEnd(params.start, params.end);
-
-    if (params.onFrame !== undefined) {
-      validateFunction(params.onFrame, "onFrame");
-    }
 
     const deviceId = await this.#ctx.device.resolveDeviceId(
       params.device_ident,
@@ -185,11 +180,10 @@ export class TelemetryManager {
     if (params.interval) payload.interval = params.interval;
     if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+      "/iot/db/telemetry/history",
       payload,
-      { onFrame: params.onFrame },
     );
 
     if (result.error) {
@@ -199,17 +193,16 @@ export class TelemetryManager {
     }
 
     // Aggregate frames into the legacy { metric: [...] } shape.
+    // REST frames are the raw row: { <metric>: { value, timestamp } }.
     const telemetry = {};
     for (const field of params.fields) {
       telemetry[field] = [];
     }
 
     for (const frame of result.frames) {
-      if (!frame.data) continue;
-      
-      for (const [metric, point] of Object.entries(frame.data)) {
+      for (const [metric, point] of Object.entries(frame)) {
         if (!telemetry[metric]) telemetry[metric] = [];
-        
+
         telemetry[metric].push({
           value: point.value,
           timestamp: point.timestamp,
@@ -240,9 +233,9 @@ export class TelemetryManager {
       params.device_ident,
     );
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.telemetry.history`,
+      "/iot/db/telemetry/history",
       {
         device_id: deviceId,
         env: this.#ctx.env,
@@ -260,13 +253,12 @@ export class TelemetryManager {
     }
 
     // last_value mode emits exactly one frame containing all metrics' last
-    // readings (or zero frames if there's no data at all).
+    // readings (or zero frames if there's no data at all). REST frames are the
+    // raw row: { <metric>: { value, timestamp } }.
     const latest = {};
-    if (result.frames.length === 0) return latest;
-
     const onlyFrame = result.frames[0];
-    if (onlyFrame?.data) {
-      for (const [metric, point] of Object.entries(onlyFrame.data)) {
+    if (onlyFrame) {
+      for (const [metric, point] of Object.entries(onlyFrame)) {
         latest[metric] = { value: point.value, timestamp: point.timestamp };
       }
     }

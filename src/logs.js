@@ -7,7 +7,7 @@ import {
   validateISO8601,
   validateStartBeforeEnd,
 } from "./validation.js";
-import { streamHistory } from "./utils.js";
+import { httpHistory } from "./utils.js";
 
 const VALID_LEVELS = ["info", "warn", "error"];
 
@@ -126,7 +126,7 @@ export class LogManager {
   // ─── History ─────────────────────────────────────────────
 
   /**
-   * Fetch historical device logs over the streaming protocol.
+   * Fetch historical device logs from the influx-db-service.
    *
    * params:
    *   device_ident  string   required
@@ -134,7 +134,6 @@ export class LogManager {
    *   start, end    ISO8601  required
    *   interval, aggregate_fn  optional bucketing (count is the only
    *                            sensible aggregate on log strings)
-   *   onFrame       function?  live frame callback
    *
    * Returns: { <level>: [{value, timestamp}, ...] }
    */
@@ -155,10 +154,6 @@ export class LogManager {
       }
     }
 
-    if (params.onFrame !== undefined) {
-      validateFunction(params.onFrame, "onFrame");
-    }
-
     const deviceId = await this.#ctx.device.resolveDeviceId(
       params.device_ident,
     );
@@ -173,11 +168,10 @@ export class LogManager {
     if (params.interval) payload.interval = params.interval;
     if (params.aggregate_fn) payload.aggregate_fn = params.aggregate_fn;
 
-    const result = await streamHistory(
+    const result = await httpHistory(
       this.#ctx,
-      `api.iot.db.${this.#ctx.orgID}.log.history`,
+      "/iot/db/log/history",
       payload,
-      { onFrame: params.onFrame },
     );
 
     if (result.error) {
@@ -191,9 +185,9 @@ export class LogManager {
       logs[lvl] = [];
     }
 
+    // REST frames are the raw row: { <level>: { value, timestamp } }.
     for (const frame of result.frames) {
-      if (!frame.data) continue;
-      for (const [level, point] of Object.entries(frame.data)) {
+      for (const [level, point] of Object.entries(frame)) {
         if (!logs[level]) logs[level] = [];
         logs[level].push({ value: point.value, timestamp: point.timestamp });
       }
