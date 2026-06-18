@@ -587,6 +587,216 @@ const all = await app.notification.list();
 const fetched = await app.notification.get("<notif_id>");
 ```
 
+## OTA (Firmware Updates)
+
+Manage over-the-air firmware from the backend: upload binaries, create rollouts
+that target a fleet, and track each device's job as it downloads and installs.
+The matching device-side flow lives in the RelayX Device SDK.
+
+### Firmware
+
+Call `init()` once after `connect()`; call it again to refresh. `firmwareList()`
+works without it.
+
+```js
+await app.ota.init();
+
+const file = readFileSync("./firmware-1.0.4.bin"); // Buffer; Blob/File also work
+const fw = await app.ota.firmwareUpload({
+  name: "Boiler controller fix", // display name shown in UI pickers
+  version: "1.0.4",              // unique per org — a duplicate throws VERSION_EXISTS
+  file,
+  file_name: "firmware-1.0.4.bin",
+});
+// → { firmware_id, version, sha256, size }
+
+// Paginated, newest first
+const { firmwares, page } = await app.ota.firmwareList({ page: 1 });
+// page → { count, has_more }
+
+await app.ota.firmwareDelete({ id: fw.firmware_id });
+```
+
+### Rollouts
+
+A rollout is the unit of deployment. It starts as a `DRAFT` (pure intent — no
+jobs exist yet) and can be edited freely. Activating it (`toggleRollout` →
+`ACTIVE`) is **the** snapshot moment: the target is resolved against the fleet as
+it exists then, one job per device is created, and devices are nudged. Anything
+past `DRAFT` is immutable — adjust by stopping and creating a new rollout.
+
+```js
+const rollout = await app.ota.createRollout({
+  firmware_id: fw.firmware_id,
+  request_type: "DOWNLOAD_INSTALL", // or "DOWNLOAD_ONLY" to pre-stage (install later)
+  target: { type: "all" },          // see Targeting below
+  force_install: false,
+  user_config: { apply: "app_gated" },
+});
+// → { rollout_id, status: "DRAFT", device_count }
+//   device_count here is a PREVIEW — the real snapshot happens at activation
+```
+
+Edit a rollout while it is still `DRAFT`:
+
+```js
+await app.ota.updateRollout({
+  rollout_id: rollout.rollout_id,
+  request_type: "DOWNLOAD_ONLY",
+});
+```
+
+Activate it — this creates the per-device jobs and nudges the fleet. The
+returned `device_count` is now the real snapshot, not a preview:
+
+```js
+await app.ota.toggleRollout({
+  rollout_id: rollout.rollout_id,
+  state: "ACTIVE",
+});
+```
+
+A live rollout moves between three states: `ACTIVE`, `PAUSED`, and `STOPPED`.
+`PAUSED` freezes pending jobs and holds the device's queue head — rollouts are
+processed FIFO per device, so the ones behind it wait too:
+
+```js
+// Pause, then resume against the same snapshot (no re-resolution)
+await app.ota.toggleRollout({
+  rollout_id: rollout.rollout_id,
+  state: "PAUSED",
+});
+
+await app.ota.toggleRollout({
+  rollout_id: rollout.rollout_id,
+  state: "ACTIVE",
+});
+```
+
+`STOPPED` is terminal — the rollout is never served again, though its jobs are
+kept as history:
+
+```js
+await app.ota.toggleRollout({
+  rollout_id: rollout.rollout_id,
+  state: "STOPPED",
+});
+```
+
+Delete (DRAFT rollouts only) and list (paginated, newest first):
+
+```js
+await app.ota.deleteRollout({ rollout_id: rollout.rollout_id });
+
+const { rollouts, page } = await app.ota.rolloutList({ page: 1 });
+// page → { count, has_more }
+```
+
+### Targeting
+
+`target` is required on `createRollout` — there is no implicit fleet-wide
+rollout, a whole-org deploy must say so explicitly. `target.type` is one of
+`"devices"`, `"logical_group"`, `"hierarchy_group"`, or `"all"`, and each type
+takes its own fields:
+
+```js
+// 1. Specific devices — device_ids is a non-empty array of device ids
+target: {
+  type: "devices",
+  device_ids: ["dev_abc", "dev_def"],
+}
+
+// 2. A logical (tag-based) group — group_id is required
+target: {
+  type: "logical_group",
+  group_id: "grp_sensors_floor1",
+}
+
+// 3. A hierarchy (path-based) group — group_id is required
+target: {
+  type: "hierarchy_group",
+  group_id: "grp_building_a",
+}
+
+// 4. The whole org
+target: {
+  type: "all",
+}
+```
+
+Any target type also accepts an optional `exclude` — an array of device ids to
+carve out of the resolved set. This is most useful with `all` or a group, e.g.
+"every device except the two on the bench":
+
+```js
+target: {
+  type: "all",
+  exclude: ["dev_bench_1", "dev_bench_2"],
+}
+```
+
+Targets are resolved twice: once as a preview when you create the DRAFT
+(`device_count`), and authoritatively at activation against the fleet as it
+exists then. A device added to a matching group after activation is not pulled
+into an already-active rollout.
+
+### Retry & install-later
+
+Re-arm terminal jobs (`FAILED`, `ROLLED_BACK`, `VETOED` → `PENDING`). A re-armed
+job keeps its original FIFO position. Omit `phases` to retry all three:
+
+```js
+const { retried } = await app.ota.retryRollout({
+  rollout_id: rollout.rollout_id,
+  phases: ["FAILED", "VETOED"],
+});
+```
+
+For a `DOWNLOAD_ONLY` rollout: once devices have staged the image, nudge them to
+install now (INSTALL_ONLY — no re-download):
+
+```js
+const { installing } = await app.ota.installRollout({
+  rollout_id: rollout.rollout_id,
+});
+```
+
+### Jobs & live phase updates
+
+A job is one device's copy of a rollout. List jobs, inspect a single device's
+history, or subscribe to every device's phase transition live instead of
+polling:
+
+```js
+const { jobs, page } = await app.ota.jobsList({
+  rollout_id: rollout.rollout_id,
+  page: 1,
+});
+
+const { history } = await app.ota.jobHistory({
+  rollout_id: rollout.rollout_id,
+  device_id: "<id>",
+});
+```
+
+Subscribe to live phase transitions for the whole org. Only one live
+subscription is active at a time:
+
+```js
+const stop = app.ota.onJobPhaseUpdate((u) => {
+  const err = u.error ? ` (err: ${u.error})` : "";
+  console.log(`device=${u.device_id} -> ${u.phase}${err}`);
+  // phases: PENDING → DOWNLOADING → DOWNLOADED → INSTALLING → INSTALLED
+  //         (terminal failures: FAILED / ROLLED_BACK / VETOED)
+});
+
+// Stop it with either the returned unsubscribe...
+stop();
+
+// ...or the manager method
+app.ota.offJobPhaseUpdate();
+```
+
 ## Offline Behavior
 
 - **Commands**: Buffered in memory while disconnected and flushed automatically on reconnect.
