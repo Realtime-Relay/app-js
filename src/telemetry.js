@@ -12,7 +12,7 @@ import {
   validateStartBeforeEnd,
   validateNonEmptyArray,
 } from "./validation.js";
-import { httpHistory } from "./utils.js";
+import { httpHistory, historyError } from "./utils.js";
 
 export class TelemetryManager {
   #ctx;
@@ -187,9 +187,7 @@ export class TelemetryManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Telemetry history failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Telemetry history", result);
     }
 
     // Aggregate frames into the legacy { metric: [...] } shape.
@@ -247,9 +245,7 @@ export class TelemetryManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Telemetry latest failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Telemetry latest", result);
     }
 
     // last_value mode emits exactly one frame containing all metrics' last

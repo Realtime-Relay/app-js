@@ -78,9 +78,17 @@ function readHistoryError(body, httpStatus) {
  * failure (frames = whatever arrived before the error). Callers check
  * result.error, then aggregate result.frames.
  */
+const MAX_PAGE_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [500, 1500];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {}) {
   const frames = [];
 
+  // Where the next page starts. Page one sends 0; after that this is the opaque
+  // cursor token the service handed back, passed through untouched — it encodes
+  // a position, not a row count, so nothing here may interpret it.
   let offset = 0;
 
   // Fetch the token once up front; only re-fetch if a page comes back 401/403.
@@ -88,19 +96,37 @@ export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {
   let triedRefresh = false;
 
   while (true) {
-    let res;
-    try {
-      res = await axios.post(
-        `${url}${path}`,
-        { ...payload, limit: pageLimit, offset },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          validateStatus: () => true,
-        },
-      );
-    } catch (err) {
-      const errorMessage = err.code || err.message || "network error";
-      return { error: true, errorMessage, frames };
+    let res = null;
+    let networkError = null;
+
+    // Retry the page rather than losing the run. A long history spans many
+    // requests, and a single blip used to discard every page already collected;
+    // re-requesting a cursor is safe because it addresses a position, so the
+    // same rows come back. 4xx is deterministic and breaks out immediately.
+    for (let attempt = 0; attempt < MAX_PAGE_ATTEMPTS; attempt++) {
+      if (attempt > 0) await sleep(RETRY_BACKOFF_MS[attempt - 1]);
+
+      try {
+        res = await axios.post(
+          `${url}${path}`,
+          { ...payload, limit: pageLimit, offset },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            validateStatus: () => true,
+          },
+        );
+        networkError = null;
+      } catch (err) {
+        res = null;
+        networkError = err.code || err.message || "network error";
+        continue;
+      }
+
+      if (res.status < 500) break;
+    }
+
+    if (res === null) {
+      return { error: true, errorMessage: networkError, frames };
     }
 
     // Token expired / invalid: refresh once, then retry the same page.
@@ -126,11 +152,28 @@ export async function httpHistory(ctx, path, payload, { pageLimit = 10_000 } = {
       break;
     }
 
-    offset = page.next_offset;
+    // Opaque — echo it back exactly. `next_cursor` is the same value under a
+    // name that doesn't lie; `next_offset` is kept for older services.
+    offset = page.next_cursor ?? page.next_offset;
     triedRefresh = false; // allow one refresh per page if a long run outlives the token
   }
 
   return { frames };
+}
+
+/**
+ * The Error a history method throws, carrying whatever arrived before the
+ * failure. A run that dies on page 40 has 39 pages' worth of usable data;
+ * `err.frames` hands it over instead of throwing it away, and `err.partial`
+ * says whether there is any.
+ */
+export function historyError(label, result) {
+  const err = new Error(
+    `${label} failed: ${result.errorMessage ?? result.status}`,
+  );
+  err.partial = (result.frames?.length ?? 0) > 0;
+  err.frames = result.frames ?? [];
+  return err;
 }
 
 export function topicPatternMatcher(patternA, patternB) {

@@ -11,7 +11,7 @@ import {
   validateISO8601,
   validateObject,
 } from "./validation.js";
-import { httpHistory } from "./utils.js";
+import { httpHistory, historyError } from "./utils.js";
 
 export class CommandManager {
   #ctx;
@@ -125,9 +125,7 @@ export class CommandManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Command history failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Command history", result);
     }
 
     // REST frames are the raw row: { <device_id>: { value, timestamp } }.

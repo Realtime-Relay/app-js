@@ -13,7 +13,7 @@ import {
   validateStartBeforeEnd,
 } from "./validation.js";
 import { EphemeralEngine } from "./ephemeral_alerting/index.js";
-import { httpHistory } from "./utils.js";
+import { httpHistory, historyError } from "./utils.js";
 
 const VALID_SOURCES = ["TELEMETRY", "COMMAND", "EVENT"];
 const VALID_RULE_TYPES = ["DEVICE", "RULE", "ORG"];
@@ -419,9 +419,7 @@ export class AlertManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Alert history failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Alert history", result);
     }
 
     // REST frames are the raw row:
