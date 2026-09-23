@@ -462,6 +462,37 @@ const hourly = await app.log.history({
 });
 ```
 
+## Messaging
+
+Pub/sub between app instances on dot-separated topics, carried over
+JetStream. `send()` buffers while offline and flushes on reconnect;
+Streams only deliver messages sent after they start.
+
+| Method | Subject |
+| --- | --- |
+| `send()`, `stream()` / `off()` | `<org>.<env>.messages.<topic>` |
+| `streamImport()` / `offImport()` | `import.<org>.<env>.messages.<topic>` |
+
+```js
+await app.messaging.stream({
+  topic: "orders.*", // wildcards: "*" one token, ">" rest (last token only)
+  callback: ({ topic, data, timestamp }) => console.log(topic, data),
+});
+
+await app.messaging.streamImport({
+  topic: "orders.*",
+  callback: ({ topic, data, timestamp }) => console.log(topic, data),
+});
+
+await app.messaging.send({ topic: "orders.created", data: { id: 42 } });
+// { sent: true } — or { sent: false, buffered: true } while offline
+
+await app.messaging.off({ topic: "orders.*" });
+await app.messaging.offImport({ topic: "orders.*" });
+```
+
+An instance streaming a topic also receives its own sends on that topic.
+
 ## Logical Groups
 
 Group devices by tags for batch operations and streaming.

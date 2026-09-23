@@ -8,7 +8,7 @@ import {
   validateISO8601,
   validateStartBeforeEnd,
 } from "./validation.js";
-import { httpHistory } from "./utils.js";
+import { httpHistory, historyError } from "./utils.js";
 
 export class EventManager {
   #ctx;
@@ -191,9 +191,7 @@ export class EventManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Event history failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Event history", result);
     }
 
     const events = {};

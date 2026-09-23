@@ -7,7 +7,7 @@ import {
   validateISO8601,
   validateStartBeforeEnd,
 } from "./validation.js";
-import { httpHistory } from "./utils.js";
+import { httpHistory, historyError } from "./utils.js";
 
 const VALID_LEVELS = ["info", "warn", "error"];
 
@@ -175,9 +175,7 @@ export class LogManager {
     );
 
     if (result.error) {
-      throw new Error(
-        `Log history failed: ${result.errorMessage ?? result.status}`,
-      );
+      throw historyError("Log history", result);
     }
 
     const logs = {};
